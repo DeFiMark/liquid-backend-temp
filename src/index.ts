@@ -7,6 +7,8 @@ import userRouter from './routes/user.js';
 import kycRouter from './routes/kyc.js';
 import webhookRouter from './routes/webhooks.js';
 import bankAccountRouter from './routes/bank-accounts.js';
+import transactionRouter from './routes/transactions.js';
+import adminRouter from './routes/admin.js';
 import { cleanupExpiredSessions } from './services/session.js';
 
 const app = express();
@@ -19,7 +21,7 @@ app.use(cors({
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.use('/auth', authRouter);
@@ -27,6 +29,8 @@ app.use('/users', userRouter);
 app.use('/webhooks', webhookRouter);
 app.use('/kyc', kycRouter);
 app.use('/accounts', bankAccountRouter);
+app.use('/transactions', transactionRouter);
+app.use('/admin', adminRouter);
 
 // Periodic session cleanup — every hour
 setInterval(() => cleanupExpiredSessions(), 60 * 60 * 1000);

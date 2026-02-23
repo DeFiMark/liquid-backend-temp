@@ -2,6 +2,7 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import { handleIDVWebhook } from '../services/kyc.js';
 import { handleItemWebhook } from '../services/bank-account.js';
+import { handleCircleDeposit, handleCirclePayout } from '../services/transaction.js';
 import { supabase } from '../lib/supabase.js';
 
 const router = Router();
@@ -69,7 +70,19 @@ router.post('/circle', async (req, res) => {
       metadata: { event_type: req.body.eventType, timestamp: new Date().toISOString() },
     });
 
-    console.log('Circle webhook received:', req.body.eventType);
+    const eventType = req.body.Type || req.body.eventType;
+
+    switch (eventType) {
+      case 'transfers':
+        await handleCircleDeposit(req.body);
+        break;
+      case 'payouts':
+        await handleCirclePayout(req.body);
+        break;
+      default:
+        console.log('Circle webhook received:', eventType);
+    }
+
     res.json({ processed: true });
   } catch (err: any) {
     console.error('Circle webhook error:', err);
