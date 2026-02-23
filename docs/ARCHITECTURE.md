@@ -1,7 +1,7 @@
 # Liquid Backend Architecture
 ## Private Credit Marketplace on Base
 
-**Document Version:** 1.0  
+**Document Version:** 1.1  
 **Date:** February 23, 2026  
 **Prepared for:** Mark (CTO)  
 **Project:** getliquid.io  
@@ -37,8 +37,12 @@
                        │ └─────────────┘ └─────────────┘ └────────┘│
                        │ ┌─────────────┐ ┌─────────────────────────┐│
                        │ │  Thirdweb   │ │      Base Network       ││
-                       │ │ (Wallets)   │ │   (USDC Contracts)      ││
+                       │ │ (Wallets)   │ │ (Deal + USDC Contracts) ││
                        │ └─────────────┘ └─────────────────────────┘│
+                       │ ┌─────────────┐                            │
+                       │ │  Goldsky    │ (On-chain indexer/subgraph)│
+                       │ │ (Subgraph)  │                            │
+                       │ └─────────────┘                            │
                        └───────────────────────────────────────────┘
 ```
 
@@ -118,7 +122,7 @@ Response: { accessToken: string, refreshToken: string, user: UserProfile }
 interface AccessTokenPayload {
   sub: string;          // user_id (UUID)
   address: string;      // wallet address
-  role: 'user' | 'admin';
+  role: 'investor' | 'borrower' | 'admin';
   iat: number;
   exp: number;          // 15 minutes
   type: 'access';
@@ -278,7 +282,7 @@ CREATE TABLE users (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'suspended', 'closed')),
-  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+  role TEXT NOT NULL DEFAULT 'investor' CHECK (role IN ('investor', 'borrower', 'admin')),
   email TEXT UNIQUE,
   profile_data JSONB DEFAULT '{}'::jsonb,
   terms_accepted_at TIMESTAMP WITH TIME ZONE,
@@ -380,64 +384,55 @@ CREATE TABLE transactions (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Investment opportunities
-CREATE TABLE opportunities (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  originator_id UUID NOT NULL, -- External reference, not FK
+-- ============================================================
+-- DEALS: Hybrid On-Chain / Off-Chain Architecture
+-- ============================================================
+-- Financial terms (APY, min/max investment, interest rate, term,
+-- payment frequency, funded amount, investor positions, status)
+-- ALL live on-chain in smart contracts. The contract is the
+-- source of truth. Backend NEVER caches or duplicates these.
+--
+-- Off-chain stores: rich media, documents, descriptions,
+-- borrower narratives — anything the contract can't hold.
+--
+-- deal_id is a uint256 from the on-chain DealFlow mapping.
+-- Same ID used as the primary key here for direct linkage.
+-- ============================================================
+
+-- Deal metadata (off-chain companion to on-chain DealFlow struct)
+CREATE TABLE deals (
+  deal_id BIGINT PRIMARY KEY,          -- matches on-chain uint256 dealId
+  borrower_address TEXT NOT NULL,       -- smart wallet that created the deal on-chain
   title TEXT NOT NULL,
-  description TEXT NOT NULL,
-  
-  -- Terms
-  target_amount NUMERIC(20,2) NOT NULL CHECK (target_amount > 0),
-  min_investment NUMERIC(20,2) NOT NULL CHECK (min_investment > 0),
-  max_investment NUMERIC(20,2),
-  interest_rate NUMERIC(5,4) NOT NULL CHECK (interest_rate > 0), -- APR as decimal
-  term_months INTEGER NOT NULL CHECK (term_months > 0),
-  payment_frequency TEXT NOT NULL CHECK (payment_frequency IN ('monthly', 'quarterly', 'maturity')),
-  
-  -- Status
-  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'funded', 'closed', 'defaulted')),
-  funded_amount NUMERIC(20,2) DEFAULT 0,
-  investor_count INTEGER DEFAULT 0,
-  
-  -- Important dates
-  opens_at TIMESTAMP WITH TIME ZONE,
-  closes_at TIMESTAMP WITH TIME ZONE,
-  funding_deadline TIMESTAMP WITH TIME ZONE,
-  maturity_date TIMESTAMP WITH TIME ZONE,
-  
-  -- Risk and compliance
+  description TEXT,
+  category TEXT,                        -- 'real_estate', 'business', 'receivables', etc.
   risk_grade TEXT CHECK (risk_grade IN ('A', 'B', 'C', 'D')),
-  originator_info JSONB NOT NULL DEFAULT '{}'::jsonb,
-  collateral_info JSONB DEFAULT '{}'::jsonb,
-  documents JSONB DEFAULT '[]'::jsonb,
-  
+  collateral_summary TEXT,             -- human-readable collateral description
+  metadata JSONB DEFAULT '{}'::jsonb,  -- flexible additional fields
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- User investments in opportunities
-CREATE TABLE investments (
+-- Deal documents (PDFs, images, property photos, financials)
+CREATE TABLE deal_documents (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
-  
-  amount NUMERIC(20,2) NOT NULL CHECK (amount > 0),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'active', 'completed', 'defaulted')),
-  
-  -- Returns tracking
-  returns_earned NUMERIC(20,2) DEFAULT 0,
-  last_payment_date TIMESTAMP WITH TIME ZONE,
-  next_payment_date TIMESTAMP WITH TIME ZONE,
-  
-  -- Blockchain references
-  investment_tx_hash TEXT, -- USDC transfer to opportunity contract
-  
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  
-  UNIQUE(user_id, opportunity_id) -- One investment per user per opportunity
+  deal_id BIGINT NOT NULL REFERENCES deals(deal_id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN (
+    'property_image', 'financial_statement', 'appraisal',
+    'legal', 'insurance', 'tax_return', 'borrower_photo',
+    'collateral_image', 'term_sheet', 'other'
+  )),
+  file_url TEXT NOT NULL,              -- Supabase Storage URL
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  file_size_bytes BIGINT,
+  uploaded_by TEXT NOT NULL,           -- smart wallet address
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- NOTE: No investments table — investor positions, amounts, returns,
+-- and payment schedules are all tracked on-chain in the smart contract.
+-- The backend reads these via viem + Goldsky subgraph for display.
 
 -- Audit log
 CREATE TABLE audit_log (
@@ -474,9 +469,10 @@ CREATE INDEX idx_circle_accounts_user ON circle_accounts(user_id);
 CREATE INDEX idx_transactions_user ON transactions(user_id);
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_type ON transactions(type);
-CREATE INDEX idx_opportunities_status ON opportunities(status);
-CREATE INDEX idx_investments_user ON investments(user_id);
-CREATE INDEX idx_investments_opportunity ON investments(opportunity_id);
+CREATE INDEX idx_deals_borrower ON deals(borrower_address);
+CREATE INDEX idx_deals_category ON deals(category);
+CREATE INDEX idx_deal_documents_deal ON deal_documents(deal_id);
+CREATE INDEX idx_deal_documents_type ON deal_documents(deal_id, type);
 CREATE INDEX idx_audit_log_actor ON audit_log(actor_id);
 CREATE INDEX idx_audit_log_resource ON audit_log(resource_type, resource_id);
 CREATE INDEX idx_sessions_user ON sessions(user_id);
@@ -528,12 +524,24 @@ CREATE POLICY "Users can view own KYC" ON kyc_records
 CREATE POLICY "Admins can view all records" ON users
   FOR SELECT USING (auth.jwt() ->> 'role' = 'admin');
 
--- Opportunities are public (but investments are private)
-CREATE POLICY "Anyone can view active opportunities" ON opportunities
-  FOR SELECT USING (status = 'active');
+-- Deals are publicly viewable (terms come from chain anyway)
+CREATE POLICY "Anyone can view deals" ON deals
+  FOR SELECT USING (true);
 
-CREATE POLICY "Users can view own investments" ON investments
-  FOR SELECT USING (auth.jwt() ->> 'sub' = user_id::text);
+-- Borrowers can only update their own deals
+CREATE POLICY "Borrowers can update own deals" ON deals
+  FOR UPDATE USING (borrower_address = current_setting('app.current_user_address', true));
+
+-- Deal documents are publicly viewable
+CREATE POLICY "Anyone can view deal documents" ON deal_documents
+  FOR SELECT USING (true);
+
+-- Only deal borrower can upload documents
+CREATE POLICY "Borrowers can insert own deal docs" ON deal_documents
+  FOR INSERT WITH CHECK (
+    uploaded_by = current_setting('app.current_user_address', true)
+    AND EXISTS (SELECT 1 FROM deals WHERE deal_id = deal_documents.deal_id AND borrower_address = uploaded_by)
+  );
 
 -- Sessions - users can only see their own
 CREATE POLICY "Users can view own sessions" ON sessions
@@ -630,19 +638,23 @@ class ColumnEncryption {
 | POST | /api/offramp/initiate | JWT | Start withdrawal | `{amount, accountId}` | `{transferId, status}` |
 | GET | /api/offramp/status/:transferId | JWT | Check withdrawal status | `{}` | `{status, amount, fees}` |
 | GET | /api/offramp/history | JWT | Withdrawal history | `{limit?, offset?}` | `{transfers[], total}` |
-| **Investments** |
-| GET | /api/investments/opportunities | JWT | Browse opportunities | `{limit?, offset?, status?}` | `{opportunities[], total}` |
-| GET | /api/investments/opportunities/:id | JWT | Get opportunity details | `{}` | `{opportunity, documents}` |
-| POST | /api/investments/invest | JWT | Make investment | `{opportunityId, amount}` | `{investmentId, txHash}` |
-| GET | /api/investments/positions | JWT | User investment positions | `{}` | `{investments[], totalValue}` |
-| POST | /api/investments/withdraw/:id | JWT | Withdraw from investment | `{amount?}` | `{withdrawalId}` |
+| **Deals (Hybrid On-Chain + Off-Chain)** |
+| GET | /api/deals | JWT | Browse deals (terms from Goldsky, metadata from DB) | `{limit?, offset?, category?}` | `{deals[], total}` |
+| GET | /api/deals/:dealId | JWT | Full deal view (on-chain terms + off-chain docs) | `{}` | `{deal, documents}` |
+| POST | /api/deals | JWT+Borrower | Create deal metadata (after on-chain creation) | `{dealId, title, description, category}` | `{deal}` |
+| PUT | /api/deals/:dealId | JWT+Borrower | Update deal metadata | `{title?, description?, category?}` | `{deal}` |
+| POST | /api/deals/:dealId/documents | JWT+Borrower | Upload deal document | `multipart/form-data` | `{document}` |
+| DELETE | /api/deals/:dealId/documents/:docId | JWT+Borrower | Remove deal document | `{}` | `{removed}` |
+| **Investments (On-Chain via Goldsky)** |
+| GET | /api/investments/positions | JWT | User positions (from Goldsky subgraph) | `{}` | `{positions[], totalValue}` |
+| GET | /api/investments/positions/:dealId | JWT | Position detail for a deal | `{}` | `{position, payments[]}` |
 | **Admin** |
 | GET | /api/admin/users | Admin | List users | `{limit?, search?, status?}` | `{users[], total}` |
 | PUT | /api/admin/users/:id/status | Admin | Update user status | `{status, reason?}` | `{updated}` |
 | GET | /api/admin/kyc/queue | Admin | KYC review queue | `{limit?, status?}` | `{queue[], total}` |
 | PUT | /api/admin/kyc/:id/review | Admin | Review KYC | `{approved, reason?}` | `{reviewed}` |
 | GET | /api/admin/transactions | Admin | Transaction monitoring | `{limit?, status?, type?}` | `{transactions[]}` |
-| POST | /api/admin/opportunities | Admin | Create opportunity | `{opportunity}` | `{created}` |
+| PUT | /api/admin/users/:id/role | Admin | Set user role (investor/borrower) | `{role}` | `{updated}` |
 | **Webhooks** |
 | POST | /api/webhooks/circle | None | Circle webhook handler | Circle payload | `{processed}` |
 | POST | /api/webhooks/plaid | None | Plaid webhook handler | Plaid payload | `{processed}` |
@@ -763,92 +775,51 @@ app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
 ### Example Route Implementation
 
 ```typescript
-// /api/investments/invest
-import { z } from 'zod';
-
-const investSchema = z.object({
-  opportunityId: z.string().uuid(),
-  amount: z.number().positive().max(1000000), // $1M max
-});
-
-app.post('/api/investments/invest',
+// GET /api/deals/:dealId — Hybrid on-chain + off-chain deal view
+app.get('/api/deals/:dealId',
   authenticateJWT,
-  validateRequest(investSchema),
-  auditLog('invest', 'investment'),
   async (req: AuthenticatedRequest, res: Response) => {
-    const { opportunityId, amount } = req.body;
-    const userId = req.user!.id;
+    const dealId = parseInt(req.params.dealId);
     
     try {
-      // 1. Validate opportunity exists and is active
-      const opportunity = await supabase
-        .from('opportunities')
-        .select('*')
-        .eq('id', opportunityId)
-        .eq('status', 'active')
-        .single();
-        
-      if (!opportunity.data) {
-        return res.status(404).json({ error: 'Opportunity not found' });
+      // Parallel fetch: on-chain terms (Goldsky) + off-chain metadata (Supabase)
+      const [terms, metadata, documents] = await Promise.all([
+        getDealTerms(dealId),           // Goldsky subgraph
+        supabase.from('deals').select('*').eq('deal_id', dealId).single(),
+        supabase.from('deal_documents').select('*').eq('deal_id', dealId)
+          .order('created_at', { ascending: false }),
+      ]);
+      
+      if (!terms) {
+        return res.status(404).json({ error: 'Deal not found on-chain' });
       }
-      
-      // 2. Check user accreditation
-      const accreditation = await supabase
-        .from('accreditation_records')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('status', 'approved')
-        .gte('expires_at', new Date().toISOString())
-        .single();
-        
-      if (!accreditation.data) {
-        return res.status(403).json({ error: 'Accreditation required' });
-      }
-      
-      // 3. Check USDC balance via Thirdweb
-      const balance = await checkUSDCBalance(req.user!.address);
-      if (balance < amount) {
-        return res.status(400).json({ error: 'Insufficient balance' });
-      }
-      
-      // 4. Create investment record
-      const investment = await supabase
-        .from('investments')
-        .insert({
-          user_id: userId,
-          opportunity_id: opportunityId,
-          amount,
-          status: 'pending',
-        })
-        .select()
-        .single();
-      
-      // 5. Execute USDC transfer to opportunity contract
-      const txHash = await executeInvestment(
-        req.user!.address,
-        opportunity.data.contract_address,
-        amount,
-        investment.data.id
-      );
-      
-      // 6. Update investment with transaction hash
-      await supabase
-        .from('investments')
-        .update({
-          investment_tx_hash: txHash,
-          status: 'confirmed',
-        })
-        .eq('id', investment.data.id);
       
       res.json({
-        investmentId: investment.data.id,
-        txHash,
-        status: 'confirmed',
+        // On-chain (source of truth for financial terms)
+        dealId: terms.id,
+        borrower: terms.borrower,
+        targetAmount: terms.targetAmount,
+        fundedAmount: terms.fundedAmount,
+        minInvestment: terms.minInvestment,
+        maxInvestment: terms.maxInvestment,
+        interestRate: terms.interestRate,
+        termMonths: terms.termMonths,
+        paymentFrequency: terms.paymentFrequency,
+        status: terms.status,
+        investorCount: terms.investorCount,
+        maturityDate: terms.maturityDate,
+        // Off-chain (rich metadata + documents)
+        title: metadata.data?.title,
+        description: metadata.data?.description,
+        category: metadata.data?.category,
+        riskGrade: metadata.data?.risk_grade,
+        collateralSummary: metadata.data?.collateral_summary,
+        documents: documents.data || [],
       });
       
     } catch (error) {
-      console.error('Investment error:', error);
-      res.status(500).json({ error: 'Investment failed' });
+      console.error('Deal fetch error:', error);
+      res.status(500).json({ error: 'Failed to fetch deal' });
     }
   }
 );
@@ -1173,6 +1144,220 @@ export async function setupGasSponsorship(): Promise<void> {
 }
 ```
 
+### Goldsky Subgraph (On-Chain Indexer)
+
+Liquid uses **Goldsky** for indexing on-chain deal data. The subgraph indexes all DealFlow contract events and provides a GraphQL API for querying deal terms, investor positions, payment history, and deal status.
+
+```typescript
+// Goldsky subgraph queries via the backend
+const GOLDSKY_ENDPOINT = process.env.GOLDSKY_SUBGRAPH_URL!;
+
+// Fetch deal financial terms (source of truth = on-chain)
+export async function getDealTerms(dealId: number): Promise<DealTerms> {
+  const query = `
+    query GetDeal($dealId: BigInt!) {
+      dealFlow(id: $dealId) {
+        id
+        borrower
+        targetAmount
+        fundedAmount
+        minInvestment
+        maxInvestment
+        interestRate
+        termMonths
+        paymentFrequency
+        status
+        investorCount
+        createdAt
+        maturityDate
+      }
+    }
+  `;
+  
+  const response = await fetch(GOLDSKY_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables: { dealId: dealId.toString() } }),
+  });
+  
+  const { data } = await response.json();
+  return data.dealFlow;
+}
+
+// Fetch investor positions for a user
+export async function getUserPositions(walletAddress: string): Promise<Position[]> {
+  const query = `
+    query GetPositions($investor: String!) {
+      investments(where: { investor: $investor }) {
+        id
+        dealId
+        amount
+        returnsEarned
+        lastPaymentDate
+        status
+      }
+    }
+  `;
+  
+  const response = await fetch(GOLDSKY_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables: { investor: walletAddress.toLowerCase() } }),
+  });
+  
+  const { data } = await response.json();
+  return data.investments;
+}
+
+// Combined deal view: on-chain terms + off-chain metadata
+export async function getFullDeal(dealId: number): Promise<FullDeal> {
+  // Parallel fetch: on-chain terms + off-chain metadata
+  const [terms, metadata, documents] = await Promise.all([
+    getDealTerms(dealId),
+    supabase.from('deals').select('*').eq('deal_id', dealId).single(),
+    supabase.from('deal_documents').select('*').eq('deal_id', dealId),
+  ]);
+  
+  return {
+    ...terms,                    // APY, rates, status, funded amount (on-chain)
+    title: metadata.data?.title,  // Rich text, descriptions (off-chain)
+    description: metadata.data?.description,
+    category: metadata.data?.category,
+    documents: documents.data,    // PDFs, images (off-chain)
+  };
+}
+```
+
+**Why Goldsky over direct RPC reads:**
+- Aggregated queries (all deals, all positions) without scanning every contract entry
+- Historical data (payment history, status changes over time)
+- GraphQL filtering/pagination built-in
+- Already in use by Liquid
+
+**Fallback:** For single-deal reads, the backend can also read directly from the contract via viem as a fallback if the subgraph is behind.
+
+### Borrower Authentication & Deal Creation
+
+Borrowers use the same SIWE auth but have an elevated role (`borrower`) in the users table. Deal creation flow:
+
+```typescript
+// Borrower middleware — requires 'borrower' or 'admin' role
+export function requireBorrower(req: Request, res: Response, next: NextFunction): void {
+  if (!req.user) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  
+  // Role check against database (cached in JWT or looked up)
+  if (req.user.role !== 'borrower' && req.user.role !== 'admin') {
+    res.status(403).json({ error: 'Borrower access required' });
+    return;
+  }
+  
+  next();
+}
+
+// Deal creation endpoint
+// POST /deals { dealId, title, description, category }
+router.post('/deals',
+  requireAuth,
+  requireBorrower,
+  async (req, res) => {
+    const { dealId, title, description, category } = req.body;
+    
+    // CRITICAL: Verify on-chain that this deal exists AND the borrower matches
+    const onChainDeal = await getDealTerms(dealId);
+    
+    if (!onChainDeal) {
+      return res.status(404).json({ error: 'Deal not found on-chain' });
+    }
+    
+    if (onChainDeal.borrower.toLowerCase() !== req.user!.address.toLowerCase()) {
+      return res.status(403).json({ error: 'Not the deal borrower' });
+    }
+    
+    // Only then create the off-chain metadata
+    const { data, error } = await supabase
+      .from('deals')
+      .insert({
+        deal_id: dealId,
+        borrower_address: req.user!.address,
+        title,
+        description,
+        category,
+      })
+      .select()
+      .single();
+    
+    if (error) {
+      return res.status(400).json({ error: 'Deal metadata already exists' });
+    }
+    
+    res.json({ deal: data });
+  }
+);
+
+// Document upload — borrower can only upload to their own deals
+router.post('/deals/:dealId/documents',
+  requireAuth,
+  requireBorrower,
+  upload.single('file'), // multer middleware
+  async (req, res) => {
+    const dealId = parseInt(req.params.dealId);
+    
+    // Verify borrower owns this deal
+    const { data: deal } = await supabase
+      .from('deals')
+      .select('borrower_address')
+      .eq('deal_id', dealId)
+      .single();
+    
+    if (!deal || deal.borrower_address.toLowerCase() !== req.user!.address.toLowerCase()) {
+      return res.status(403).json({ error: 'Not authorized for this deal' });
+    }
+    
+    // Upload to Supabase Storage
+    const filePath = `deals/${dealId}/${req.file!.originalname}`;
+    const { error: uploadError } = await supabase.storage
+      .from('deal-documents')
+      .upload(filePath, req.file!.buffer, {
+        contentType: req.file!.mimetype,
+      });
+    
+    if (uploadError) {
+      return res.status(500).json({ error: 'Upload failed' });
+    }
+    
+    const { data: { publicUrl } } = supabase.storage
+      .from('deal-documents')
+      .getPublicUrl(filePath);
+    
+    // Create document record
+    const { data: doc } = await supabase
+      .from('deal_documents')
+      .insert({
+        deal_id: dealId,
+        type: req.body.type || 'other',
+        file_url: publicUrl,
+        filename: req.file!.originalname,
+        mime_type: req.file!.mimetype,
+        file_size_bytes: req.file!.size,
+        uploaded_by: req.user!.address,
+      })
+      .select()
+      .single();
+    
+    res.json({ document: doc });
+  }
+);
+```
+
+**Security layers on deal creation:**
+1. `requireAuth` — valid JWT
+2. `requireBorrower` — user has borrower role (admin-granted)
+3. On-chain verification — contract confirms `msg.sender == borrower` for that dealId
+4. Even with a stolen borrower JWT, you can't claim someone else's deal
+
 ### Webhook Security Implementation
 
 ```typescript
@@ -1378,6 +1563,9 @@ USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 # Base USDC
 # Base Network
 BASE_RPC_URL=https://mainnet.base.org
 CHAIN_ID=8453
+
+# Goldsky Subgraph
+GOLDSKY_SUBGRAPH_URL=https://api.goldsky.com/api/public/project_id/subgraphs/liquid/1.0.0/gn
 
 # Monitoring
 SENTRY_DSN=your-sentry-dsn
@@ -2419,17 +2607,22 @@ PUT /api/admin/accreditation/:id/review
    - Single Supabase project or separate staging/production?
    - Should we implement read replicas for heavy analytical queries?
 
-3. **Opportunity Contract Design**:
-   - ERC-20 receipt tokens for investments, or simple balance tracking?
-   - Automated return distributions via smart contract or manual admin process?
+3. **Deal Contract Design**:
+   - ✅ DECIDED: Contract is source of truth for financial terms (APY, rates, status, positions)
+   - ✅ DECIDED: Goldsky subgraph for indexing, Supabase for off-chain metadata/docs
+   - ✅ DECIDED: deal_id (uint256) shared key between on-chain and off-chain
+   - Remaining: ERC-20 receipt tokens for positions, or mapping-based tracking?
+   - Remaining: Automated return distributions via contract or manual admin?
 
 4. **KYC Document Storage**:
    - Supabase Storage vs dedicated S3 bucket for compliance documents?
    - Document retention: cloud storage or move to cold storage after closure?
 
-5. **Multi-tenancy**:
-   - Single database with RLS vs separate schemas per originator?
-   - How do we handle multiple originators creating opportunities?
+5. **Borrower Onboarding**:
+   - ✅ DECIDED: Borrowers get `role: 'borrower'` in users table (admin-granted)
+   - ✅ DECIDED: Same SIWE auth, elevated permissions via requireBorrower middleware
+   - ✅ DECIDED: On-chain verification — backend checks contract borrower matches JWT address
+   - Remaining: Borrower application/approval workflow? Self-service or admin-gated?
 
 ### Business Logic Clarifications:
 
