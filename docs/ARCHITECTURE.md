@@ -1,7 +1,7 @@
 # Liquid Backend Architecture
 ## Private Credit Marketplace on Base
 
-**Document Version:** 1.1  
+**Document Version:** 1.3  
 **Date:** February 23, 2026  
 **Prepared for:** Mark (CTO)  
 **Project:** getliquid.io  
@@ -1079,83 +1079,26 @@ export async function handleCircleWebhook(req: Request, res: Response) {
 }
 ```
 
-### Thirdweb Smart Wallet Integration
+### Smart Wallets (Thirdweb — Frontend Only)
 
-```typescript
-import { ThirdwebSDK } from '@thirdweb-dev/sdk';
-import { BaseGoerli } from '@thirdweb-dev/chains';
+**The backend does NOT use the Thirdweb SDK.** There is no `thirdweb` npm dependency.
 
-const sdk = ThirdwebSDK.fromPrivateKey(
-  process.env.THIRDWEB_PRIVATE_KEY!,
-  BaseGoerli, // Use Base mainnet in production
-  {
-    gasless: {
-      openzeppelin: {
-        relayerUrl: process.env.THIRDWEB_RELAYER_URL!,
-      },
-    },
-  }
-);
+Wallet creation and management is 100% frontend:
+1. Frontend uses Thirdweb SDK to create in-app wallet (EOA) + smart account
+2. Smart wallet signs SIWE message (ERC-6492 for pre-deployed, EIP-1271 for deployed)
+3. Backend verifies via `viem.verifyMessage` — no Thirdweb SDK needed
+4. The verified SIWE address IS the smart wallet, stored as `wallet_address`
 
-// NOTE: Smart wallet creation is handled entirely by the FRONTEND (Thirdweb SDK).
-// The backend NEVER creates wallets. The smart wallet address is captured during
-// SIWE authentication — the smart wallet signs the SIWE message (ERC-6492/EIP-1271),
-// and viem.verifyMessage proves the smart wallet authorized the auth request.
-// The verified SIWE address IS the smart wallet address, stored as wallet_address.
-// See Section 2 (Authentication) for the full flow.
+**Backend wallet service** (`src/services/smart-wallet.ts`):
+- `registerSmartWallet(userId, address)` — fallback registration for edge cases
+- `getSmartWalletAddress(userId)` — lookup
+- Smart wallet is IMMUTABLE once set
+- No two users can register the same address
 
-// Check USDC Balance
-export async function checkUSDCBalance(walletAddress: string): Promise<number> {
-  const usdcContract = await sdk.getContract(
-    process.env.USDC_CONTRACT_ADDRESS!, // Base USDC
-    'erc20'
-  );
-  
-  const balance = await usdcContract.balanceOf(walletAddress);
-  return parseFloat(balance.displayValue);
-}
-
-// Execute Investment (Transfer USDC)
-export async function executeInvestment(
-  userAddress: string,
-  opportunityContract: string,
-  amount: number,
-  investmentId: string
-): Promise<string> {
-  const usdcContract = await sdk.getContract(
-    process.env.USDC_CONTRACT_ADDRESS!,
-    'erc20'
-  );
-  
-  // Transfer USDC to opportunity contract with investment ID as data
-  const tx = await usdcContract.transfer(
-    opportunityContract,
-    amount.toString()
-  );
-  
-  return tx.receipt.transactionHash;
-}
-
-// Gas Sponsorship Configuration
-export async function setupGasSponsorship(): Promise<void> {
-  // Configure which operations are sponsored
-  const sponsorshipRules = {
-    // Sponsor USDC transfers for investments
-    'transfer': {
-      contract: process.env.USDC_CONTRACT_ADDRESS!,
-      maxAmount: '10000', // $10k max per transaction
-    },
-    // Sponsor opportunity contract interactions
-    'invest': {
-      contracts: getAllOpportunityContracts(),
-      maxGasLimit: 100000,
-    },
-  };
-  
-  // Apply to Thirdweb relayer
-  await configureRelayerRules(sponsorshipRules);
-}
-```
+**On-chain reads** (USDC balance, positions, deal terms) are done via:
+- Frontend: viem direct reads from contract
+- Backend: Goldsky subgraph for aggregated queries
+- No Thirdweb SDK involved in either path
 
 ### Goldsky Subgraph (On-Chain Indexer)
 
@@ -1671,13 +1614,11 @@ CIRCLE_ENV=sandbox # or production
 CIRCLE_WEBHOOK_SECRET=your-circle-webhook-secret
 CIRCLE_ROUTING_NUMBER=your-routing-number
 
-# Thirdweb
-THIRDWEB_PRIVATE_KEY=your-private-key
-THIRDWEB_RELAYER_URL=https://your-relayer.thirdweb.com
-SMART_WALLET_FACTORY_ADDRESS=0x...
-USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 # Base USDC
+# Thirdweb — NOT NEEDED ON BACKEND (wallet creation is 100% frontend)
+# No thirdweb npm dependency exists on the backend.
 
 # Base Network
+USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 # Base USDC
 BASE_RPC_URL=https://mainnet.base.org
 CHAIN_ID=8453
 
@@ -2351,7 +2292,6 @@ app.get('/api/health', async (req, res) => {
       database: 'unknown',
       plaid: 'unknown',
       circle: 'unknown',
-      thirdweb: 'unknown',
     },
   };
   
@@ -2377,14 +2317,6 @@ app.get('/api/health', async (req, res) => {
       health.checks.circle = 'healthy';
     } catch {
       health.checks.circle = 'unhealthy';
-    }
-    
-    // Thirdweb check
-    try {
-      await sdk.getProvider().getBlockNumber();
-      health.checks.thirdweb = 'healthy';
-    } catch {
-      health.checks.thirdweb = 'unhealthy';
     }
     
     const isHealthy = Object.values(health.checks).every(status => status === 'healthy');
