@@ -28,22 +28,23 @@
 - [x] Webhook routes: Plaid (signature verified), Circle (stub), Goldsky (stub)
 - [x] IDV approval auto-activates user, sets 1yr expiry
 
-### Phase 3: Bank Account Linking (in progress)
+### Phase 3: Bank Account Linking (commit `f053407`)
 - [x] Plaid Link token creation
 - [x] Public token exchange + encrypted storage
-- [x] Processor token creation (for Circle)
+- [x] Processor token creation (for Circle) — with IDOR fix
 - [x] Account listing, detail, deactivation
 - [x] ITEM webhook handling (errors, expiration)
 - [x] Only checking/savings accounts allowed
 
-## Remaining
-
-### Phase 4: Circle Mint Integration
-- [ ] Circle client library
-- [ ] Wire instruction management
-- [ ] USDC mint/redeem flow
-- [ ] Transfer status tracking
-- [ ] Circle webhooks (transfers, payouts)
+### Phase 4: Circle Mint + Transactions + Admin (commit `174a76d`)
+- [x] Circle client (native fetch, idempotency keys, sandbox/production toggle)
+- [x] Deposit flow: wire instructions + user-specific memo for attribution
+- [x] Withdrawal flow: linked account ownership check + transaction record
+- [x] Transaction history with type/status filters + pagination
+- [x] Circle webhook handling (deposit completion, payout status)
+- [x] Admin routes: Circle balance, deposits, payouts, user management, audit log
+- [x] Health check endpoint (`GET /health`)
+- [x] requireAdmin middleware (role-based)
 
 ### Phase 5: Deal Management
 - [ ] Goldsky webhook handler (deal events)
@@ -85,7 +86,10 @@
 | Sessions | 6 | session.test.ts |
 | Encryption | 10 | encryption.test.ts |
 | KYC | 8 | kyc.test.ts |
-| **Total** | **59** | **7 files** |
+| Bank Accounts | 10 | bank-account.test.ts |
+| Circle Client | 9 | circle.test.ts |
+| Transactions | 12 | transaction.test.ts |
+| **Total** | **90** | **10 files** |
 
 ## API Routes
 | Method | Path | Auth | KYC | Description |
@@ -104,6 +108,17 @@
 | GET | `/accounts/:id` | ✅ | ❌ | Get account detail |
 | DELETE | `/accounts/:id` | ✅ | ❌ | Deactivate account |
 | POST | `/accounts/:id/processor-token` | ✅ | ✅ | Create processor token |
+| POST | `/transactions/deposit` | ✅ | ✅ | Initiate deposit (wire instructions) |
+| POST | `/transactions/withdraw` | ✅ | ✅ | Initiate withdrawal |
+| GET | `/transactions` | ✅ | ❌ | Transaction history |
+| GET | `/transactions/:id` | ✅ | ❌ | Single transaction |
+| GET | `/admin/circle/balance` | admin | ❌ | Circle wallet balance |
+| GET | `/admin/circle/deposits` | admin | ❌ | Recent Circle deposits |
+| GET | `/admin/circle/payouts` | admin | ❌ | Recent Circle payouts |
+| GET | `/admin/users` | admin | ❌ | List users (paginated) |
+| PUT | `/admin/users/:id/status` | admin | ❌ | Update user status |
+| GET | `/admin/audit` | admin | ❌ | Audit log |
+| GET | `/health` | ❌ | ❌ | Health check |
 | POST | `/webhooks/plaid` | sig | ❌ | Plaid webhooks |
-| POST | `/webhooks/circle` | sig | ❌ | Circle webhooks (stub) |
+| POST | `/webhooks/circle` | sig | ❌ | Circle webhooks |
 | POST | `/webhooks/goldsky` | — | ❌ | Goldsky webhooks (stub) |
