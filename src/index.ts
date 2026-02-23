@@ -4,6 +4,8 @@ import helmet from 'helmet';
 import cors from 'cors';
 import authRouter from './auth/router.js';
 import userRouter from './routes/user.js';
+import kycRouter from './routes/kyc.js';
+import webhookRouter from './routes/webhooks.js';
 import { cleanupExpiredSessions } from './services/session.js';
 
 const app = express();
@@ -21,6 +23,8 @@ app.get('/health', (_req, res) => {
 
 app.use('/auth', authRouter);
 app.use('/users', userRouter);
+app.use('/webhooks', webhookRouter);
+app.use('/kyc', kycRouter);
 
 // Periodic session cleanup — every hour
 setInterval(() => cleanupExpiredSessions(), 60 * 60 * 1000);

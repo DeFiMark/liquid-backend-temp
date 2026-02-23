@@ -9,6 +9,9 @@ const mockEq = vi.fn();
 const mockOr = vi.fn();
 const mockSingle = vi.fn();
 const mockLt = vi.fn();
+const mockIn = vi.fn();
+const mockOrder = vi.fn();
+const mockLimit = vi.fn();
 
 const chain: Record<string, any> = {
   select: mockSelect,
@@ -19,13 +22,16 @@ const chain: Record<string, any> = {
   or: mockOr,
   single: mockSingle,
   lt: mockLt,
+  in: mockIn,
+  order: mockOrder,
+  limit: mockLimit,
 };
 
 Object.values(chain).forEach((fn: any) => fn.mockReturnValue(chain));
 mockFrom.mockReturnValue(chain);
 
 export const mockSupabase = { from: mockFrom };
-export const mocks = { mockFrom, mockSelect, mockInsert, mockUpdate, mockDelete, mockEq, mockOr, mockSingle, mockLt };
+export const mocks = { mockFrom, mockSelect, mockInsert, mockUpdate, mockDelete, mockEq, mockOr, mockSingle, mockLt, mockIn, mockOrder, mockLimit };
 
 export function resetMocks() {
   Object.values(mocks).forEach(fn => {

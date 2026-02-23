@@ -1,10 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-
-// TODO: Replace with actual Supabase KYC status lookup
-async function isKycVerified(_address: string): Promise<boolean> {
-  // TODO: Query Supabase for KYC verification status
-  return false;
-}
+import { supabase } from '../lib/supabase.js';
 
 export async function requireKyc(req: Request, res: Response, next: NextFunction): Promise<void> {
   if (!req.user) {
@@ -12,9 +7,15 @@ export async function requireKyc(req: Request, res: Response, next: NextFunction
     return;
   }
 
-  const verified = await isKycVerified(req.user.address);
+  const { data } = await supabase
+    .from('kyc_records')
+    .select('status')
+    .eq('user_id', req.user.id)
+    .eq('status', 'approved')
+    .limit(1)
+    .single();
 
-  if (!verified) {
+  if (!data) {
     res.status(403).json({ error: 'KYC verification required' });
     return;
   }
