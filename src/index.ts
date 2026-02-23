@@ -9,6 +9,8 @@ import webhookRouter from './routes/webhooks.js';
 import bankAccountRouter from './routes/bank-accounts.js';
 import transactionRouter from './routes/transactions.js';
 import adminRouter from './routes/admin.js';
+import dealRouter from './routes/deals.js';
+import uploadRouter from './routes/upload.js';
 import { cleanupExpiredSessions } from './services/session.js';
 
 const app = express();
@@ -31,6 +33,8 @@ app.use('/kyc', kycRouter);
 app.use('/accounts', bankAccountRouter);
 app.use('/transactions', transactionRouter);
 app.use('/admin', adminRouter);
+app.use('/deals', dealRouter);
+app.use('/upload', uploadRouter);
 
 // Periodic session cleanup — every hour
 setInterval(() => cleanupExpiredSessions(), 60 * 60 * 1000);

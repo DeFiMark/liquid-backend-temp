@@ -92,7 +92,24 @@ router.post('/circle', async (req, res) => {
 
 router.post('/goldsky', async (req, res) => {
   try {
-    console.log('Goldsky webhook received:', req.body.event_type);
+    const event = req.body;
+
+    await supabase.from('audit_log').insert({
+      action: 'webhook_received',
+      resource_type: 'goldsky',
+      metadata: { event_type: event.event_type || event.type, timestamp: new Date().toISOString() },
+    });
+
+    if (event.event_type === 'DealCreated' || event.type === 'DealCreated') {
+      const { createDealFromEvent } = await import('../services/deal.js');
+      const dealId = parseInt(event.data?.dealId || event.dealId);
+      const borrower = event.data?.borrower || event.borrower;
+
+      if (!isNaN(dealId) && borrower) {
+        await createDealFromEvent({ dealId, borrowerAddress: borrower });
+      }
+    }
+
     res.json({ processed: true });
   } catch (err: any) {
     console.error('Goldsky webhook error:', err);
