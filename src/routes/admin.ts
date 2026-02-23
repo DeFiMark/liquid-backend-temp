@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/requireAuth.js';
 import { auditLog } from '../middleware/auditLog.js';
 import * as circle from '../lib/circle.js';
 import { supabase } from '../lib/supabase.js';
+import { decrypt } from '../lib/encryption.js';
 
 const router = Router();
 
@@ -106,6 +107,84 @@ router.put('/users/:id/status',
       res.json({ user: data });
     } catch (err: any) {
       res.status(500).json({ error: 'Failed to update user status' });
+    }
+  }
+);
+
+// GET /admin/users/:id/kyc — Decrypted KYC record for auditing
+router.get('/users/:id/kyc',
+  requireAuth,
+  requireAdmin,
+  auditLog('admin_view_kyc', 'kyc_record'),
+  async (req, res) => {
+    try {
+      const { data: kycRecord, error } = await supabase
+        .from('kyc_records')
+        .select('*')
+        .eq('user_id', req.params.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (error || !kycRecord) {
+        res.status(404).json({ error: 'KYC record not found' });
+        return;
+      }
+
+      // Decrypt PII fields for admin viewing
+      const decrypted: Record<string, any> = {
+        id: kycRecord.id,
+        user_id: kycRecord.user_id,
+        provider: kycRecord.provider,
+        status: kycRecord.status,
+        plaid_idv_id: kycRecord.plaid_idv_id,
+        email: kycRecord.email,
+        id_document_type: kycRecord.id_document_type,
+        aml_screening_result: kycRecord.aml_screening_result,
+        submitted_at: kycRecord.submitted_at,
+        verified_at: kycRecord.verified_at,
+        expires_at: kycRecord.expires_at,
+        data_retention_until: kycRecord.data_retention_until,
+        rejection_reason: kycRecord.rejection_reason,
+        created_at: kycRecord.created_at,
+      };
+
+      // Decrypt each encrypted field (gracefully handle missing/corrupt data)
+      const encryptedFields: Array<[string, string]> = [
+        ['full_name_encrypted', 'full_name'],
+        ['date_of_birth_encrypted', 'date_of_birth'],
+        ['address_encrypted', 'address'],
+        ['phone_encrypted', 'phone'],
+        ['id_document_number_encrypted', 'id_document_number'],
+      ];
+
+      for (const [encField, plainField] of encryptedFields) {
+        if (kycRecord[encField]) {
+          try {
+            const val = decrypt(kycRecord[encField]);
+            // address is stored as JSON string
+            decrypted[plainField] = plainField === 'address' ? JSON.parse(val) : val;
+          } catch {
+            decrypted[plainField] = '[decryption failed]';
+          }
+        } else {
+          decrypted[plainField] = null;
+        }
+      }
+
+      // Full verification summary (large — only include if requested)
+      if (req.query.full === 'true' && kycRecord.verification_summary_encrypted) {
+        try {
+          decrypted.verification_summary = JSON.parse(decrypt(kycRecord.verification_summary_encrypted));
+        } catch {
+          decrypted.verification_summary = '[decryption failed]';
+        }
+      }
+
+      res.json({ kyc: decrypted });
+    } catch (err: any) {
+      console.error('KYC fetch error:', err);
+      res.status(500).json({ error: 'Failed to fetch KYC record' });
     }
   }
 );
