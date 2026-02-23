@@ -4,7 +4,7 @@ import { verifySiweMessage } from './verify.js';
 import { issueTokens, verifyRefreshToken } from './jwt.js';
 import { validate } from '../middleware/validate.js';
 import { challengeQuerySchema, verifyBodySchema, refreshBodySchema } from '../schemas/auth.js';
-import { findUserByAddress, createUser } from '../services/user.js';
+import { findUserByAddress, createUser, findUserById } from '../services/user.js';
 import { createSession, validateSession, rotateSession, invalidateSession } from '../services/session.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
@@ -72,10 +72,17 @@ router.post('/refresh', validate(refreshBodySchema), async (req, res) => {
       return;
     }
 
+    // Load user to get current role + address
+    const user = await findUserById(userId);
+    if (!user) {
+      res.status(401).json({ error: 'User not found' });
+      return;
+    }
+
     const tokens = issueTokens({
-      sub: payload.sub,
-      address: payload.sub,
-      role: 'investor', // Will be overridden when we load user
+      sub: user.id,
+      address: user.smart_wallet_address || user.wallet_address,
+      role: user.role,
     });
 
     // Rotate session
