@@ -114,6 +114,12 @@ npm ci && npm run build
 | Circle | `POST /webhooks/circle` | Circle signature header |
 | Goldsky | `POST /webhooks/goldsky` | TBD |
 
+### Auth Flow Note
+The smart wallet signs SIWE directly (ERC-6492 for pre-deployed, EIP-1271 for deployed).
+The backend does NOT use Thirdweb SDK — wallet creation is 100% frontend.
+`wallet_address` in DB = the verified SIWE address = smart wallet = user identity.
+See `docs/ARCHITECTURE.md` Section 2 for the full flow.
+
 ### Security Notes
 - `ENCRYPTION_KEY` must be a 64-char hex string (32 bytes). Generate with `openssl rand -hex 32`
 - In production, do NOT rely on JWT_SECRET fallback for encryption

@@ -46,28 +46,31 @@
 - [x] Health check endpoint (`GET /health`)
 - [x] requireAdmin middleware (role-based)
 
-### Phase 5: Deal Management
-- [ ] Goldsky webhook handler (deal events)
-- [ ] Deal metadata CRUD (borrower-side)
-- [ ] Deal document upload (Supabase Storage)
-- [ ] Deal query endpoints (investor-side)
+### Phase 5: Deal Management (commit `51a3998`)
+- [x] Goldsky webhook handler (DealCreated → auto-create DB row, idempotent)
+- [x] Deal metadata CRUD (borrower-only updates, any-user reads)
+- [x] Deal document upload (Supabase Storage, 50MB/file, PDF/JPEG/PNG/WebP/XLSX/DOCX)
+- [x] Deal query endpoints (list with filters, detail with documents)
 
-### Phase 6: Investment Flow
+### Phase 7: Smart Wallet Auth (commit `f7d497f`)
+- [x] Smart wallet signs SIWE directly (ERC-6492 / EIP-1271)
+- [x] viem verifyMessage handles all signature types natively
+- [x] wallet_address = verified SIWE address = smart wallet = user identity
+- [x] NO Thirdweb SDK on backend — frontend creates wallets via Thirdweb SDK
+- [x] Smart wallet address is IMMUTABLE after first auth
+- [x] /wallet/register fallback (edge cases only)
+- [x] EOA is audit-only (optional field in verify)
+
+## Remaining
+
+### Phase 6: Investment Flow (blocked on smart contract)
 - [ ] Investment initiation (deposit → USDC → on-chain)
 - [ ] Position tracking via contract reads
 - [ ] Withdrawal/redemption flow
-- [ ] Transaction history
 
-### Phase 7: Smart Wallets (Thirdweb)
-- [ ] Proactive smart wallet creation on registration
-- [ ] Gas sponsorship configuration
-- [ ] Wallet recovery / EOA rotation support
-
-### Phase 8: Admin & Monitoring
-- [ ] Admin routes (user management, deal oversight)
-- [ ] Health check endpoint
-- [ ] Error tracking setup (Sentry or similar)
+### Phase 8: Production Hardening
 - [ ] Rate limiting on public endpoints
+- [ ] Error tracking setup (Sentry or similar)
 
 ### Phase 9: Production Hardening
 - [ ] Railway deployment config
@@ -89,7 +92,9 @@
 | Bank Accounts | 10 | bank-account.test.ts |
 | Circle Client | 9 | circle.test.ts |
 | Transactions | 12 | transaction.test.ts |
-| **Total** | **90** | **10 files** |
+| Deals | 20 | deal.test.ts |
+| Smart Wallet | 6 | smart-wallet.test.ts |
+| **Total** | **116** | **12 files** |
 
 ## API Routes
 | Method | Path | Auth | KYC | Description |
@@ -121,4 +126,14 @@
 | GET | `/health` | ❌ | ❌ | Health check |
 | POST | `/webhooks/plaid` | sig | ❌ | Plaid webhooks |
 | POST | `/webhooks/circle` | sig | ❌ | Circle webhooks |
-| POST | `/webhooks/goldsky` | — | ❌ | Goldsky webhooks (stub) |
+| POST | `/webhooks/goldsky` | — | ❌ | Goldsky webhooks (DealCreated) |
+| GET | `/deals` | ✅ | ❌ | List deals (filters) |
+| GET | `/deals/:dealId` | ✅ | ❌ | Deal detail with documents |
+| PUT | `/deals/:dealId` | ✅ borrower | ❌ | Update deal metadata |
+| GET | `/deals/:dealId/documents` | ✅ | ❌ | List deal documents |
+| POST | `/deals/:dealId/documents` | ✅ borrower | ❌ | Add document |
+| DELETE | `/deals/:dealId/documents/:docId` | ✅ borrower | ❌ | Delete document |
+| POST | `/upload/deal-document` | ✅ | ❌ | Upload to Supabase Storage |
+| POST | `/wallet/register` | ✅ | ❌ | Register smart wallet (fallback) |
+| GET | `/wallet` | ✅ | ❌ | Get wallet info |
+| GET | `/admin/users/:id/kyc` | admin | ❌ | Decrypted KYC record |

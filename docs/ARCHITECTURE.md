@@ -88,32 +88,42 @@ liquid-platform/
 
 ---
 
-## 2. Authentication (SIWE)
+## 2. Authentication (Smart Wallet SIWE — ERC-6492/EIP-1271)
 
-### SIWE Flow Implementation
+### CRITICAL: The Smart Wallet IS the SIWE Signer
 
-```typescript
-// 1. Nonce Generation
-POST /api/auth/nonce
-Response: { nonce: string, expiresAt: number }
+The smart wallet address signs SIWE directly. Every login, the smart account produces the signature.
+viem's `verifyMessage` natively handles all cases:
 
-// 2. Challenge Message Creation (Frontend)
-const message = `${domain} wants you to sign in with your Ethereum account:
-${address}
+- **EOA signatures** — standard ECDSA
+- **Deployed smart wallet** — EIP-1271 (`isValidSignature` on-chain call)
+- **Pre-deployed smart wallet** — ERC-6492 (simulates deployment + signature check, no gas)
 
-Liquid access for accredited investors only.
+**There is NO separate wallet registration step.** The SIWE signature IS the cryptographic proof
+that the smart wallet authorized this auth request. The address in the SIWE message = smart wallet = user identity.
 
-URI: ${origin}
-Version: 1
-Chain ID: 8453
-Nonce: ${nonce}
-Issued At: ${issuedAt}`;
+### Auth Flow
 
-// 3. Signature Verification & JWT Issuance
-POST /api/auth/verify
-Body: { message: string, signature: string, address: string }
-Response: { accessToken: string, refreshToken: string, user: UserProfile }
 ```
+Frontend (Thirdweb SDK):
+  1. Create in-app wallet (EOA signer) + smart account
+  2. GET /auth/challenge?address=<SMART_WALLET_ADDRESS>
+  3. Build SIWE message with address = smart wallet
+  4. Sign as smart account → produces ERC-6492 signature (if undeployed) or EIP-1271
+
+Backend:
+  5. POST /auth/verify { message, signature, eoa? }
+  6. viem.verifyMessage(address=smartWallet, message, signature) → true/false
+  7. Find or create user: wallet_address = smart wallet (the verified SIWE address)
+  8. Issue JWT: { sub: userId, address: smartWallet, eoa: optional, role }
+  9. Return tokens + user profile
+```
+
+### Why This Works for Undeployed Wallets
+
+ERC-6492 wraps: factory address + deployment calldata + actual signature.
+viem simulates the deployment in a read call (no gas) and then checks `isValidSignature`.
+Result: the smart wallet can sign before it's ever deployed on-chain.
 
 ### JWT Structure
 
@@ -121,70 +131,41 @@ Response: { accessToken: string, refreshToken: string, user: UserProfile }
 // Access Token (15min expiry)
 interface AccessTokenPayload {
   sub: string;          // user_id (UUID)
-  address: string;      // wallet address
+  address: string;      // SMART WALLET address (verified via SIWE)
+  eoa?: string;         // EOA signer (audit trail only, NOT identity)
   role: 'investor' | 'borrower' | 'admin';
-  iat: number;
-  exp: number;          // 15 minutes
   type: 'access';
 }
 
 // Refresh Token (7 days expiry)
 interface RefreshTokenPayload {
   sub: string;          // user_id
-  sessionId: string;    // for session management
-  iat: number;
-  exp: number;          // 7 days
   type: 'refresh';
 }
 ```
 
-### Session Management Strategy
+### Session Management
 
-```typescript
-// sessions table tracks all active refresh tokens
-interface Session {
-  id: string;
-  user_id: string;
-  refresh_token_hash: string;  // SHA-256 hash
-  device_info: string;         // User-Agent fingerprint
-  ip_address: string;
-  created_at: timestamp;
-  expires_at: timestamp;
-  last_used_at: timestamp;
-}
+- Refresh tokens stored as SHA-256 hashes in `sessions` table
+- Token rotation on each refresh (old deleted, new created)
+- 7-day expiry with automatic cleanup
+- Device info + IP logged per session
 
-// Refresh token rotation on each use
-POST /api/auth/refresh
-- Validate refresh token
-- Issue new access + refresh token pair
-- Invalidate old refresh token
-- Update session record
-```
+### Identity Model
 
-### SIWE + Thirdweb Smart Wallets
+- `wallet_address` = the SIWE-verified address = **smart wallet** = primary identity
+- `smart_wallet_address` = same value (for backward compat)
+- `eoa` = optional audit field, NOT used for identity or auth decisions
+- Smart wallet address is **IMMUTABLE** after first registration
+- KYC whitelist on smart contract uses smart wallet address
+- All on-chain positions tracked against smart wallet address
 
-Thirdweb smart wallets (EIP-4337) require special handling:
+### NO Thirdweb SDK on Backend
 
-```typescript
-// Smart wallet signature verification
-import { verifyTypedData } from 'viem';
-import { isValidSignature } from '@thirdweb-dev/auth';
+The backend does NOT use the Thirdweb SDK. Wallet creation is 100% frontend.
+Backend only stores the verified address and uses viem for signature verification.
 
-async function verifySmartWalletSignature(
-  message: string,
-  signature: string,
-  address: string
-): Promise<boolean> {
-  // Try standard ECDSA first (EOA)
-  const isEOA = await verifyMessage(message, signature, address);
-  if (isEOA) return true;
-
-  // Try EIP-1271 (smart wallet)
-  return await isValidSignature(message, signature, address, 8453);
-}
-```
-
-### Authentication Middleware Pattern
+### Authentication (Smart Wallet SIWE — ERC-6492/EIP-1271) Middleware Pattern
 
 ```typescript
 import jwt from 'jsonwebtoken';
@@ -1116,46 +1097,12 @@ const sdk = ThirdwebSDK.fromPrivateKey(
   }
 );
 
-// Create Smart Wallet for User — PROACTIVELY during registration
-// Smart wallets are created immediately after SIWE verification,
-// NOT on-demand during first investment. This ensures we have
-// the smart account address for auth/verification from day one,
-// avoiding accidentally pairing everything to the EOA.
-export async function createSmartWallet(userAddress: string): Promise<string> {
-  const smartWalletFactory = await sdk.getContract(
-    process.env.SMART_WALLET_FACTORY_ADDRESS!
-  );
-  
-  const tx = await smartWalletFactory.call('createAccount', [
-    userAddress,
-    0, // salt
-  ]);
-  
-  // Get the created wallet address
-  const walletAddress = await smartWalletFactory.call('getAddress', [
-    userAddress,
-    0,
-  ]);
-  
-  return walletAddress;
-}
-
-// Called during user registration (POST /api/auth/verify) after SIWE success
-export async function onUserRegistration(eoaAddress: string, userId: string): Promise<void> {
-  // Proactively create smart wallet
-  const smartWalletAddress = await createSmartWallet(eoaAddress);
-  
-  // Store smart wallet address — this becomes the primary address for all operations
-  await supabase
-    .from('users')
-    .update({
-      smart_wallet_address: smartWalletAddress,
-      wallet_address: eoaAddress, // Keep EOA as reference
-    })
-    .eq('id', userId);
-  
-  console.log(`Smart wallet ${smartWalletAddress} created for user ${userId}`);
-}
+// NOTE: Smart wallet creation is handled entirely by the FRONTEND (Thirdweb SDK).
+// The backend NEVER creates wallets. The smart wallet address is captured during
+// SIWE authentication — the smart wallet signs the SIWE message (ERC-6492/EIP-1271),
+// and viem.verifyMessage proves the smart wallet authorized the auth request.
+// The verified SIWE address IS the smart wallet address, stored as wallet_address.
+// See Section 2 (Authentication) for the full flow.
 
 // Check USDC Balance
 export async function checkUSDCBalance(walletAddress: string): Promise<number> {
