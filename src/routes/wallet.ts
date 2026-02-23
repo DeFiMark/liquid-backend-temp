@@ -2,44 +2,24 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { auditLog } from '../middleware/auditLog.js';
 import { validate } from '../middleware/validate.js';
-import { registerSmartWallet, getSmartWalletAddress, ensureSmartWallet, isThirdwebConfigured } from '../services/smart-wallet.js';
+import { registerSmartWallet, getSmartWalletAddress } from '../services/smart-wallet.js';
 import { registerWalletSchema } from '../schemas/wallet.js';
 
 const router = Router();
 
 /**
- * POST /wallet/setup
- * 
- * Proactively create/predict smart wallet using server-side Thirdweb SDK.
- * Called by frontend after first login. Requires THIRDWEB_SECRET_KEY.
- */
-router.post('/setup',
-  requireAuth,
-  auditLog('setup_smart_wallet', 'wallet'),
-  async (req, res) => {
-    try {
-      if (!isThirdwebConfigured()) {
-        res.status(503).json({ error: 'Smart wallet service not configured' });
-        return;
-      }
-
-      const address = await ensureSmartWallet(req.user!.id, req.user!.address);
-      res.json({ smartWalletAddress: address });
-    } catch (err: any) {
-      console.error('Wallet setup error:', err);
-      res.status(500).json({ error: 'Failed to setup smart wallet' });
-    }
-  }
-);
-
-/**
  * POST /wallet/register
  * 
- * Frontend calls this after Thirdweb creates the smart account.
- * Stores the smart wallet address as the user's on-chain identity.
+ * FALLBACK ONLY — normally the smart wallet address is captured during SIWE auth
+ * (the SIWE message address IS the smart wallet, verified via ERC-6492/EIP-1271).
+ * 
+ * This endpoint exists for edge cases where:
+ * - User authenticated with EOA before smart wallet was created
+ * - Migration from old auth flow
+ * - Manual address correction by support
  * 
  * IMMUTABLE: Once set, cannot be changed (returns 409 if different address sent).
- * IDEMPOTENT: Sending the same address again is fine (returns 200).
+ * IDEMPOTENT: Sending the same address again returns 200.
  */
 router.post('/register',
   requireAuth,
@@ -65,9 +45,8 @@ router.post('/register',
  * GET /wallet
  * 
  * Returns the user's wallet info:
- * - smartWalletAddress: their on-chain identity (null if not yet registered)
+ * - smartWalletAddress: their on-chain identity (= wallet_address from SIWE)
  * - eoaAddress: the signing EOA (from JWT, for reference only)
- * - configured: whether server-side Thirdweb prediction is available
  */
 router.get('/',
   requireAuth,
@@ -76,8 +55,7 @@ router.get('/',
       const address = await getSmartWalletAddress(req.user!.id);
       res.json({
         smartWalletAddress: address,
-        eoaAddress: req.user!.eoa || req.user!.address,
-        configured: isThirdwebConfigured(),
+        eoaAddress: req.user!.eoa || null,
       });
     } catch (err: any) {
       res.status(500).json({ error: 'Failed to get wallet info' });

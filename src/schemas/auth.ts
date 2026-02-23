@@ -7,6 +7,7 @@ export const challengeQuerySchema = z.object({
 export const verifyBodySchema = z.object({
   message: z.string().min(1, 'Message is required'),
   signature: z.string().regex(/^0x/, 'Signature must start with 0x'),
+  eoa: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(), // Optional EOA for audit trail
 });
 
 export const refreshBodySchema = z.object({
