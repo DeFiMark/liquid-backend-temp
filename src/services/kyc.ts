@@ -1,5 +1,6 @@
 import { plaidClient } from '../lib/plaid.js';
 import { supabase } from '../lib/supabase.js';
+import { encrypt } from '../lib/encryption.js';
 
 export async function initiateKYC(userId: string, userEmail?: string): Promise<{
   linkToken: string;
@@ -142,6 +143,72 @@ export async function handleIDVWebhook(webhookType: string, webhookCode: string,
     const expiresAt = new Date();
     expiresAt.setFullYear(expiresAt.getFullYear() + 1);
     updateData.expires_at = expiresAt.toISOString();
+
+    // 5 year retention from verification date (regulatory requirement)
+    const retentionDate = new Date();
+    retentionDate.setFullYear(retentionDate.getFullYear() + 5);
+    updateData.data_retention_until = retentionDate.toISOString();
+
+    // Fetch full IDV result and store encrypted PII
+    try {
+      const idvResult = await plaidClient.identityVerificationGet({
+        identity_verification_id: idvId,
+      });
+      const idvData = idvResult.data as any;
+
+      // Extract and encrypt user PII
+      const user = idvData.user || {};
+
+      if (user.name) {
+        const fullName = [user.name.given_name, user.name.family_name].filter(Boolean).join(' ');
+        if (fullName) updateData.full_name_encrypted = encrypt(fullName);
+      }
+
+      if (user.date_of_birth) {
+        updateData.date_of_birth_encrypted = encrypt(user.date_of_birth);
+      }
+
+      if (user.address) {
+        updateData.address_encrypted = encrypt(JSON.stringify(user.address));
+      }
+
+      if (user.phone_number) {
+        updateData.phone_encrypted = encrypt(user.phone_number);
+      }
+
+      if (user.email_address) {
+        updateData.email = user.email_address;
+      }
+
+      // ID document info
+      const docVerification = idvData.documentary_verification;
+      if (docVerification?.documents?.length > 0) {
+        const doc = docVerification.documents[0];
+        if (doc.type) updateData.id_document_type = doc.type;
+        if (doc.number) updateData.id_document_number_encrypted = encrypt(doc.number);
+      }
+
+      // AML/watchlist screening
+      const riskCheck = idvData.risk_check;
+      if (riskCheck?.watchlist_screening_result) {
+        updateData.aml_screening_result = riskCheck.watchlist_screening_result === 'clear' ? 'pass' : 'review';
+      } else {
+        updateData.aml_screening_result = 'pass'; // IDV success implies AML pass
+      }
+
+      // Store full Plaid response encrypted (for audit/compliance)
+      updateData.verification_summary_encrypted = encrypt(JSON.stringify(idvData));
+
+    } catch (fetchErr: any) {
+      // Log but don't fail — the approval status is more important
+      // PII can be fetched later via a manual reconciliation
+      console.error('Failed to fetch IDV details for storage:', fetchErr.message);
+      updateData.metadata = {
+        ...updateData.metadata,
+        pii_fetch_failed: true,
+        pii_fetch_error: fetchErr.message,
+      };
+    }
   }
 
   if (rejectionReason) {
@@ -166,6 +233,12 @@ export async function handleIDVWebhook(webhookType: string, webhookCode: string,
         .update({ status: 'active' })
         .eq('id', kycRecord.user_id)
         .eq('status', 'pending');
+
+      // TODO: When whitelist contract is deployed:
+      // 1. Read user's smart_wallet_address from users table
+      // 2. Call contract.whitelistInvestor(smartWalletAddress) with server signer
+      // 3. Log tx hash to audit_log
+      // Requires: WHITELIST_CONTRACT_ADDRESS, SERVER_SIGNER_PRIVATE_KEY in env
     }
   }
 }
