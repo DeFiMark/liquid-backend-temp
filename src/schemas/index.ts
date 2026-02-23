@@ -3,3 +3,4 @@ export * from './user.js';
 export * from './bank-account.js';
 export * from './transaction.js';
 export * from './deal.js';
+export * from './wallet.js';

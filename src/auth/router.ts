@@ -33,6 +33,20 @@ router.post('/verify', validate(verifyBodySchema), async (req, res) => {
       user = await createUser(result.address);
     }
 
+    // Attempt to proactively create smart wallet (server-side prediction)
+    if (!user.smart_wallet_address) {
+      try {
+        const { ensureSmartWallet, isThirdwebConfigured } = await import('../services/smart-wallet.js');
+        if (isThirdwebConfigured()) {
+          const smartWalletAddr = await ensureSmartWallet(user.id, result.address);
+          user.smart_wallet_address = smartWalletAddr;
+        }
+      } catch (walletErr: any) {
+        // Don't fail auth if wallet prediction fails
+        console.error('Smart wallet setup during auth failed:', walletErr.message);
+      }
+    }
+
     const tokens = issueTokens({
       sub: user.id,
       address: user.smart_wallet_address || user.wallet_address,

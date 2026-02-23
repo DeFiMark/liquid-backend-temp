@@ -11,6 +11,7 @@ import transactionRouter from './routes/transactions.js';
 import adminRouter from './routes/admin.js';
 import dealRouter from './routes/deals.js';
 import uploadRouter from './routes/upload.js';
+import walletRouter from './routes/wallet.js';
 import { cleanupExpiredSessions } from './services/session.js';
 
 const app = express();
@@ -35,6 +36,7 @@ app.use('/transactions', transactionRouter);
 app.use('/admin', adminRouter);
 app.use('/deals', dealRouter);
 app.use('/upload', uploadRouter);
+app.use('/wallet', walletRouter);
 
 // Periodic session cleanup — every hour
 setInterval(() => cleanupExpiredSessions(), 60 * 60 * 1000);
