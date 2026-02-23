@@ -3,6 +3,8 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import authRouter from './auth/router.js';
+import userRouter from './routes/user.js';
+import { cleanupExpiredSessions } from './services/session.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,6 +20,10 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/auth', authRouter);
+app.use('/users', userRouter);
+
+// Periodic session cleanup — every hour
+setInterval(() => cleanupExpiredSessions(), 60 * 60 * 1000);
 
 app.listen(port, () => {
   console.log(`Liquid backend listening on port ${port}`);

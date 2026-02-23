@@ -15,8 +15,10 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   try {
     const payload = verifyAccessToken(token);
     req.user = {
-      address: payload.sub,
+      id: payload.sub,
+      address: payload.address || payload.sub,
       eoa: payload.eoa,
+      role: payload.role || 'investor',
     };
     next();
   } catch (err) {

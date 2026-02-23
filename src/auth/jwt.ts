@@ -8,7 +8,9 @@ function getSecret(): string {
 
 export interface AccessTokenPayload {
   sub: string;
+  address?: string;
   eoa?: string;
+  role?: string;
   type: 'access';
 }
 
@@ -17,23 +19,38 @@ export interface RefreshTokenPayload {
   type: 'refresh';
 }
 
+/**
+ * Issue JWT tokens.
+ * New signature: issueTokens({ sub, address, eoa, role })
+ * Legacy signature: issueTokens(address, eoa?) — kept for backward compat
+ */
 export function issueTokens(
-  smartWalletAddress: string,
+  subjectOrOpts: string | { sub: string; address: string; eoa?: string; role: string },
   eoa?: string
 ): { accessToken: string; refreshToken: string } {
   const secret = getSecret();
 
-  const accessToken = jwt.sign(
-    { sub: smartWalletAddress, eoa, type: 'access' } satisfies AccessTokenPayload,
-    secret,
-    { expiresIn: '15m' }
-  );
+  let payload: AccessTokenPayload;
+  let refreshPayload: RefreshTokenPayload;
 
-  const refreshToken = jwt.sign(
-    { sub: smartWalletAddress, type: 'refresh' } satisfies RefreshTokenPayload,
-    secret,
-    { expiresIn: '7d' }
-  );
+  if (typeof subjectOrOpts === 'string') {
+    // Legacy: issueTokens(address, eoa?)
+    payload = { sub: subjectOrOpts, eoa, type: 'access' };
+    refreshPayload = { sub: subjectOrOpts, type: 'refresh' };
+  } else {
+    // New: issueTokens({ sub, address, eoa, role })
+    payload = {
+      sub: subjectOrOpts.sub,
+      address: subjectOrOpts.address,
+      eoa: subjectOrOpts.eoa,
+      role: subjectOrOpts.role,
+      type: 'access',
+    };
+    refreshPayload = { sub: subjectOrOpts.sub, type: 'refresh' };
+  }
+
+  const accessToken = jwt.sign(payload, secret, { expiresIn: '15m' });
+  const refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: '7d' });
 
   return { accessToken, refreshToken };
 }

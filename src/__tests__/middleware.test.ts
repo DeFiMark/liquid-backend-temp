@@ -23,7 +23,7 @@ describe('requireAuth middleware', () => {
     requireAuth(req, res, next);
 
     expect(next).toHaveBeenCalled();
-    expect(req.user).toEqual({ address: '0xabc123', eoa: '0xeoa456' });
+    expect(req.user).toEqual({ id: '0xabc123', address: '0xabc123', eoa: '0xeoa456', role: 'investor' });
   });
 
   it('rejects missing header', () => {
