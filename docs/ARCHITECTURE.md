@@ -403,7 +403,7 @@ CREATE TABLE transactions (
 CREATE TABLE deals (
   deal_id BIGINT PRIMARY KEY,          -- matches on-chain uint256 dealId
   borrower_address TEXT NOT NULL,       -- smart wallet that created the deal on-chain
-  title TEXT NOT NULL,
+  title TEXT,                           -- NULL until borrower updates via API
   description TEXT,
   category TEXT,                        -- 'real_estate', 'business', 'receivables', etc.
   risk_grade TEXT CHECK (risk_grade IN ('A', 'B', 'C', 'D')),
@@ -494,6 +494,54 @@ CREATE TRIGGER update_kyc_records_updated_at BEFORE UPDATE ON kyc_records
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- Add similar triggers for other tables...
+```
+
+### Address-to-User Resolution for Reports
+
+On-chain deals contain only wallet addresses. For borrower reports showing who invested in their deals, the backend resolves addresses to KYC'd user profiles (name, contact info) from Supabase.
+
+```typescript
+interface UserProfile {
+  address: string;
+  userId: string;
+  email: string | null;
+  name: string | null;
+  kycStatus: string;
+  accreditationStatus: string;
+}
+
+/**
+ * Resolve on-chain wallet addresses to KYC'd user profiles.
+ * Used for borrower reports mapping investors to identities.
+ */
+export async function resolveAddressesToUsers(
+  addresses: string[]
+): Promise<UserProfile[]> {
+  const normalizedAddresses = addresses.map(a => a.toLowerCase());
+
+  const { data, error } = await supabase
+    .from('users')
+    .select(`
+      id,
+      wallet_address,
+      email,
+      profile_data,
+      kyc_records(status),
+      accreditation_records(status)
+    `)
+    .in('wallet_address', normalizedAddresses);
+
+  if (error) throw error;
+
+  return (data || []).map(user => ({
+    address: user.wallet_address,
+    userId: user.id,
+    email: user.email,
+    name: user.profile_data?.full_name || null,
+    kycStatus: user.kyc_records?.[0]?.status || 'none',
+    accreditationStatus: user.accreditation_records?.[0]?.status || 'none',
+  }));
+}
 ```
 
 ### Row Level Security (RLS) Policies
@@ -641,8 +689,7 @@ class ColumnEncryption {
 | **Deals (Hybrid On-Chain + Off-Chain)** |
 | GET | /api/deals | JWT | Browse deals (terms from Goldsky, metadata from DB) | `{limit?, offset?, category?}` | `{deals[], total}` |
 | GET | /api/deals/:dealId | JWT | Full deal view (on-chain terms + off-chain docs) | `{}` | `{deal, documents}` |
-| POST | /api/deals | JWT+Borrower | Create deal metadata (after on-chain creation) | `{dealId, title, description, category}` | `{deal}` |
-| PUT | /api/deals/:dealId | JWT+Borrower | Update deal metadata | `{title?, description?, category?}` | `{deal}` |
+| PUT | /api/deals/:dealId | JWT+Borrower | Update deal metadata (row auto-created by event) | `{title?, description?, category?}` | `{deal}` |
 | POST | /api/deals/:dealId/documents | JWT+Borrower | Upload deal document | `multipart/form-data` | `{document}` |
 | DELETE | /api/deals/:dealId/documents/:docId | JWT+Borrower | Remove deal document | `{}` | `{removed}` |
 | **Investments (On-Chain via Goldsky)** |
@@ -658,6 +705,7 @@ class ColumnEncryption {
 | **Webhooks** |
 | POST | /api/webhooks/circle | None | Circle webhook handler | Circle payload | `{processed}` |
 | POST | /api/webhooks/plaid | None | Plaid webhook handler | Plaid payload | `{processed}` |
+| POST | /api/webhooks/goldsky | None | Deal event indexing (DealCreated, etc.) | Goldsky payload | `{processed}` |
 
 ### Middleware Stack Implementation
 
@@ -1071,7 +1119,11 @@ const sdk = ThirdwebSDK.fromPrivateKey(
   }
 );
 
-// Create Smart Wallet for User
+// Create Smart Wallet for User — PROACTIVELY during registration
+// Smart wallets are created immediately after SIWE verification,
+// NOT on-demand during first investment. This ensures we have
+// the smart account address for auth/verification from day one,
+// avoiding accidentally pairing everything to the EOA.
 export async function createSmartWallet(userAddress: string): Promise<string> {
   const smartWalletFactory = await sdk.getContract(
     process.env.SMART_WALLET_FACTORY_ADDRESS!
@@ -1089,6 +1141,23 @@ export async function createSmartWallet(userAddress: string): Promise<string> {
   ]);
   
   return walletAddress;
+}
+
+// Called during user registration (POST /api/auth/verify) after SIWE success
+export async function onUserRegistration(eoaAddress: string, userId: string): Promise<void> {
+  // Proactively create smart wallet
+  const smartWalletAddress = await createSmartWallet(eoaAddress);
+  
+  // Store smart wallet address — this becomes the primary address for all operations
+  await supabase
+    .from('users')
+    .update({
+      smart_wallet_address: smartWalletAddress,
+      wallet_address: eoaAddress, // Keep EOA as reference
+    })
+    .eq('id', userId);
+  
+  console.log(`Smart wallet ${smartWalletAddress} created for user ${userId}`);
 }
 
 // Check USDC Balance
@@ -1228,17 +1297,49 @@ export async function getFullDeal(dealId: number): Promise<FullDeal> {
 }
 ```
 
+**Goldsky Webhooks for Deal Events:**
+
+In addition to the GraphQL subgraph, Goldsky delivers real-time webhooks when on-chain events fire. The `DealCreated` event triggers automatic DB row creation via `POST /api/webhooks/goldsky`:
+
+```typescript
+// Goldsky webhook payload for DealCreated
+interface GoldskyWebhookPayload {
+  event_type: 'DealCreated' | 'DealFunded' | 'PaymentMade' | 'DealClosed';
+  data: {
+    dealId: string;
+    borrower: string;
+    blockNumber: number;
+    blockTimestamp: number;
+    transactionHash: string;
+  };
+}
+
+// Webhook signature verification
+function verifyGoldskyWebhook(body: any, signature: string): boolean {
+  const hash = crypto
+    .createHmac('sha256', process.env.GOLDSKY_WEBHOOK_SECRET!)
+    .update(JSON.stringify(body))
+    .digest('hex');
+
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(hash)
+  );
+}
+```
+
 **Why Goldsky over direct RPC reads:**
 - Aggregated queries (all deals, all positions) without scanning every contract entry
 - Historical data (payment history, status changes over time)
 - GraphQL filtering/pagination built-in
+- Real-time webhooks for event-driven deal creation
 - Already in use by Liquid
 
-**Fallback:** For single-deal reads, the backend can also read directly from the contract via viem as a fallback if the subgraph is behind.
+**Fallback:** For single-deal reads, the backend can also read directly from the contract via viem as a fallback if the subgraph is behind. For deal creation events, a WebSocket listener to Base can serve as a fallback if Goldsky webhooks are delayed.
 
 ### Borrower Authentication & Deal Creation
 
-Borrowers use the same SIWE auth but have an elevated role (`borrower`) in the users table. Deal creation flow:
+Borrowers use the same SIWE auth but have an elevated role (`borrower`) in the users table. Deal creation is **event-driven**: the backend automatically creates a DB row when a `DealCreated` event fires on-chain (via Goldsky webhook or WebSocket listener). The borrower then updates metadata via API.
 
 ```typescript
 // Borrower middleware — requires 'borrower' or 'admin' role
@@ -1257,42 +1358,113 @@ export function requireBorrower(req: Request, res: Response, next: NextFunction)
   next();
 }
 
-// Deal creation endpoint
-// POST /deals { dealId, title, description, category }
-router.post('/deals',
+// ============================================================
+// Event-Driven Deal Creation
+// ============================================================
+// When the borrower creates a deal on-chain, the DealCreated event
+// is indexed by Goldsky and delivered via webhook. The backend
+// auto-creates a deals row with deal_id + borrower_address.
+// Title, description, and category are NULL until the borrower
+// updates them via PUT /deals/:dealId.
+// ============================================================
+
+class DealEventListener {
+  /**
+   * Handle incoming Goldsky webhook for DealCreated events.
+   * Called by POST /api/webhooks/goldsky
+   */
+  static async handleDealCreatedEvent(event: {
+    dealId: bigint;
+    borrower: string;
+    blockTimestamp: number;
+  }): Promise<void> {
+    const { dealId, borrower, blockTimestamp } = event;
+
+    // Auto-create deals row — title/description/category are NULL initially
+    const { error } = await supabase
+      .from('deals')
+      .upsert({
+        deal_id: Number(dealId),
+        borrower_address: borrower,
+        created_at: new Date(blockTimestamp * 1000).toISOString(),
+      }, { onConflict: 'deal_id' });
+
+    if (error) {
+      console.error(`Failed to auto-create deal ${dealId}:`, error);
+      throw error;
+    }
+
+    console.log(`Auto-created deal ${dealId} for borrower ${borrower}`);
+  }
+}
+
+// Goldsky webhook endpoint
+// POST /api/webhooks/goldsky — receives indexed on-chain events
+router.post('/api/webhooks/goldsky',
+  async (req, res) => {
+    // Verify webhook signature (Goldsky signs payloads)
+    const signature = req.headers['x-goldsky-signature'] as string;
+    if (!verifyGoldskyWebhook(req.body, signature)) {
+      return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
+
+    const { event_type, data } = req.body;
+
+    switch (event_type) {
+      case 'DealCreated':
+        await DealEventListener.handleDealCreatedEvent({
+          dealId: BigInt(data.dealId),
+          borrower: data.borrower,
+          blockTimestamp: data.blockTimestamp,
+        });
+        break;
+
+      // Future: DealFunded, PaymentMade, DealClosed, etc.
+      default:
+        console.log(`Unhandled event type: ${event_type}`);
+    }
+
+    res.json({ processed: true });
+  }
+);
+
+// Deal metadata update endpoint (borrower fills in title/description/category)
+// PUT /deals/:dealId { title, description, category }
+router.put('/deals/:dealId',
   requireAuth,
   requireBorrower,
   async (req, res) => {
-    const { dealId, title, description, category } = req.body;
-    
-    // CRITICAL: Verify on-chain that this deal exists AND the borrower matches
-    const onChainDeal = await getDealTerms(dealId);
-    
-    if (!onChainDeal) {
-      return res.status(404).json({ error: 'Deal not found on-chain' });
+    const dealId = parseInt(req.params.dealId);
+    const { title, description, category } = req.body;
+
+    // Verify the deal row exists (created by event listener)
+    const { data: existingDeal } = await supabase
+      .from('deals')
+      .select('deal_id, borrower_address')
+      .eq('deal_id', dealId)
+      .single();
+
+    if (!existingDeal) {
+      return res.status(404).json({ error: 'Deal not found — waiting for on-chain event' });
     }
-    
-    if (onChainDeal.borrower.toLowerCase() !== req.user!.address.toLowerCase()) {
+
+    // Verify borrower owns this deal
+    if (existingDeal.borrower_address.toLowerCase() !== req.user!.address.toLowerCase()) {
       return res.status(403).json({ error: 'Not the deal borrower' });
     }
-    
-    // Only then create the off-chain metadata
+
+    // Update metadata
     const { data, error } = await supabase
       .from('deals')
-      .insert({
-        deal_id: dealId,
-        borrower_address: req.user!.address,
-        title,
-        description,
-        category,
-      })
+      .update({ title, description, category })
+      .eq('deal_id', dealId)
       .select()
       .single();
-    
+
     if (error) {
-      return res.status(400).json({ error: 'Deal metadata already exists' });
+      return res.status(400).json({ error: 'Failed to update deal metadata' });
     }
-    
+
     res.json({ deal: data });
   }
 );
@@ -1352,11 +1524,12 @@ router.post('/deals/:dealId/documents',
 );
 ```
 
-**Security layers on deal creation:**
-1. `requireAuth` — valid JWT
-2. `requireBorrower` — user has borrower role (admin-granted)
-3. On-chain verification — contract confirms `msg.sender == borrower` for that dealId
-4. Even with a stolen borrower JWT, you can't claim someone else's deal
+**Security layers on deal creation (event-driven):**
+1. On-chain event is the trigger — no frontend can fake a `DealCreated` event
+2. Goldsky webhook signature verification prevents spoofed webhooks
+3. `requireAuth` + `requireBorrower` — valid JWT with borrower role for metadata updates
+4. Borrower address match — only the on-chain deal creator can update metadata
+5. Even with a stolen borrower JWT, you can't claim someone else's deal
 
 ### Webhook Security Implementation
 
@@ -1564,8 +1737,9 @@ USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 # Base USDC
 BASE_RPC_URL=https://mainnet.base.org
 CHAIN_ID=8453
 
-# Goldsky Subgraph
+# Goldsky Subgraph + Webhooks
 GOLDSKY_SUBGRAPH_URL=https://api.goldsky.com/api/public/project_id/subgraphs/liquid/1.0.0/gn
+GOLDSKY_WEBHOOK_SECRET=your-goldsky-webhook-secret
 
 # Monitoring
 SENTRY_DSN=your-sentry-dsn
@@ -2382,6 +2556,7 @@ supabase db push --db-url $DATABASE_URL
 |---------|------|--------------|-------|
 | **Infrastructure** |
 | Supabase Pro | Production | $25 | 500MB database, 2GB bandwidth |
+| Supabase Storage | Document storage | ~$0.02 | ~$0.021/GB/month, starting <1GB. Cold storage migration planned later |
 | Railway Pro | API + Worker + Redis | $20-40 | Usage-based, ~$0.000463/min/GB |
 | Domain & DNS | .io domain | $5 | Cloudflare DNS (free) |
 | SSL Certificate | Let's Encrypt | $0 | Free automated renewal |
@@ -2595,72 +2770,37 @@ PUT /api/admin/accreditation/:id/review
 
 ---
 
-## 11. Open Questions for Mark
+## 11. Resolved Architecture Decisions
 
-### Technical Decisions Required:
+Decisions from Mark's review (February 2026):
 
-1. **Smart Wallet Strategy**: 
-   - Should we create smart wallets proactively during registration, or on-demand during first investment?
-   - Preferred wallet factory: Thirdweb's or custom implementation?
+### Technical Decisions
 
-2. **Database Architecture**:
-   - Single Supabase project or separate staging/production?
-   - Should we implement read replicas for heavy analytical queries?
+1. ✅ **Smart Wallet Strategy**: Create smart wallets **proactively during registration** (after SIWE verification), not on-demand. This ensures we have the smart account address for auth/verification from day one so we don't accidentally pair everything to the EOA. Using **Thirdweb**.
 
-3. **Deal Contract Design**:
-   - ✅ DECIDED: Contract is source of truth for financial terms (APY, rates, status, positions)
-   - ✅ DECIDED: Goldsky subgraph for indexing, Supabase for off-chain metadata/docs
-   - ✅ DECIDED: deal_id (uint256) shared key between on-chain and off-chain
-   - Remaining: ERC-20 receipt tokens for positions, or mapping-based tracking?
-   - Remaining: Automated return distributions via contract or manual admin?
+2. ✅ **Database Architecture**: Single Supabase project is sufficient for MVP. No read replicas needed. Will need to generate **reports mapping on-chain addresses to KYC'd users** (address → name + details from Supabase) — see `resolveAddressesToUsers()` helper in Section 3.
 
-4. **KYC Document Storage**:
-   - Supabase Storage vs dedicated S3 bucket for compliance documents?
-   - Document retention: cloud storage or move to cold storage after closure?
+3. ✅ **Deal Contract Design**: Contract is source of truth. Track balance transfers + all dealflow on-chain as well as via subgraphs + events. Deal creation is event-driven — `DealCreated` event auto-creates DB row via Goldsky webhook. `deal_id` (uint256) is the shared key between on-chain and off-chain.
 
-5. **Borrower Onboarding**:
-   - ✅ DECIDED: Borrowers get `role: 'borrower'` in users table (admin-granted)
-   - ✅ DECIDED: Same SIWE auth, elevated permissions via requireBorrower middleware
-   - ✅ DECIDED: On-chain verification — backend checks contract borrower matches JWT address
-   - Remaining: Borrower application/approval workflow? Self-service or admin-gated?
+4. ✅ **KYC Document Storage**: **Supabase Storage** for now. ~10MB per deal expected. Starting with ~2 borrowers, not huge volume. Persistent storage; cold storage migration planned for later if needed.
 
-### Business Logic Clarifications:
+5. ✅ **Multi-tenancy**: Single DB with RLS. Borrowers get a special **Borrower ID**. Limited borrowers initially (may grow to 5+ after first year or two).
 
-6. **Accreditation Verification**:
-   - Self-certification vs third-party verification service?
-   - Annual re-verification process and automation level?
+### Business Logic Decisions
 
-7. **Investment Minimums/Maximums**:
-   - Platform-wide limits vs per-opportunity limits?
-   - How do we handle partial fills and pro-rata allocation?
+6. ✅ **Accreditation Verification**: Will use a **third-party verification service** (not self-certification). Vendor TBD — evaluate during Phase 8.
 
-8. **Fee Structure**:
-   - Management fees charged to investors or originators?
-   - How are platform fees collected (USDC from investments, fiat from wire fees)?
+7. ✅ **Investment Minimums/Maximums**: Set by the **borrower when creating the deal**. Users can join with partial amounts within min/max. All tracked on-chain.
 
-9. **Compliance Reporting**:
-   - 1099 generation automation or manual process?
-   - Which regulatory reports need automated generation?
+8. ✅ **Fee Structure**: Not worrying about fees for MVP. Will revisit post-launch.
 
-### Infrastructure & Scaling:
+9. ⏳ **Compliance Reporting**: **TODO** — Mark needs to research further. 1099 generation, regulatory reports, and automation level are TBD. Flag for follow-up before Phase 7.
 
-10. **Geographic Expansion**:
-    - US-only initially, but database design for international users later?
-    - Multi-region deployment strategy for latency?
+### Infrastructure Decisions
 
-11. **Disaster Recovery**:
-    - RTO/RPO requirements for financial data?
-    - Cross-region backup strategy and testing frequency?
+10. ✅ **Geographic Expansion**: US-only initially. Single US server. Multi-region not needed for MVP.
 
-### Recommendations Pending Decisions:
-
-- **Start with Thirdweb smart wallets** (faster implementation)
-- **Single Supabase project** with staging/production separation
-- **Self-certification for accreditation** initially (add third-party verification in Phase 8)
-- **Supabase Storage for documents** (compliance-ready, integrated)
-- **US-only database design** (can expand schemas later)
-
-These decisions will impact implementation timeline and architecture complexity. Please prioritize the technical decisions (1-5) as they affect Phase 1-2 development.
+11. ✅ **Disaster Recovery**: Implement standard practices — daily automated backups, point-in-time recovery via Supabase, document the RTO/RPO. No cross-region replication for MVP.
 
 ---
 
