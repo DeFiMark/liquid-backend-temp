@@ -63,6 +63,7 @@ export async function exchangeAndStoreAccount(
 }
 
 export async function createProcessorToken(
+  userId: string,
   linkedAccountId: string,
   processor: string = 'circle'
 ): Promise<string> {
@@ -70,6 +71,7 @@ export async function createProcessorToken(
     .from('linked_accounts')
     .select('plaid_access_token_encrypted, plaid_account_id')
     .eq('id', linkedAccountId)
+    .eq('user_id', userId)
     .eq('status', 'active')
     .single();
 

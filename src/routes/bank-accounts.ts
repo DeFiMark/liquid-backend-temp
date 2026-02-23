@@ -113,7 +113,7 @@ router.post('/:id/processor-token',
   auditLog('create_processor_token', 'linked_account'),
   async (req, res) => {
     try {
-      const token = await createProcessorToken(req.params.id);
+      const token = await createProcessorToken(req.user!.id, req.params.id);
       res.json({ processorToken: token });
     } catch (err: any) {
       console.error('Processor token error:', err);
