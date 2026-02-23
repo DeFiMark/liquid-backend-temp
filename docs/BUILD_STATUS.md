@@ -63,21 +63,34 @@
 
 ## Remaining
 
-### Phase 6: Investment Flow (blocked on smart contract)
-- [ ] Investment initiation (deposit → USDC → on-chain)
-- [ ] Position tracking via contract reads
-- [ ] Withdrawal/redemption flow
+### Phase 6: On-Chain Integration (blocked on smart contract)
+- [ ] **KYC whitelist call** — when Plaid IDV approves, call `addToWhitelist(address)` on contract. Needs: contract address, ABI, server signer EOA with admin role + ETH for gas
+- [ ] Goldsky webhook handlers for investment events (InvestmentMade, RedemptionProcessed) — optional, for notifications/activity feeds
 
-### Phase 8: Production Hardening
-- [ ] Rate limiting on public endpoints
-- [ ] Error tracking setup (Sentry or similar)
+**NOT backend work (clarification):**
+- Investing/redeeming USDC into deals = 100% on-chain transactions initiated by the frontend
+- Position tracking / portfolio views = frontend reads from contract + Goldsky subgraph
+- The backend does NOT touch investment funds — non-custodial architecture
 
-### Phase 9: Production Hardening
-- [ ] Railway deployment config
-- [ ] Production encryption key rotation plan
-- [ ] Webhook signature verification (all providers)
-- [ ] CORS lockdown
-- [ ] Request logging + audit trail export
+### Phase 8-9: Production Hardening ✅
+- [x] Rate limiting with Upstash Redis (sliding window, in-memory fallback for dev)
+- [x] Global error handler middleware (multer errors, JSON parse, generic 500)
+- [x] Request logging middleware (method, path, status, duration, IP)
+- [x] CORS lockdown (reject all cross-origin in prod if CORS_ORIGINS not set)
+- [x] Content-type enforcement (415 for non-JSON on mutation endpoints)
+- [x] Graceful shutdown (SIGTERM → drain connections → exit)
+- [x] Security headers via helmet
+- [x] JSON body limit (1MB)
+
+### Non-Code Items
+- [ ] Compliance counsel — MTL exemption opinion, Reg D filing, broker-dealer analysis, privacy policy
+- [ ] Accreditation verification vendor — who checks investor status?
+- [ ] Plaid + Circle production credentials (when ready to go live)
+
+### NOT Needed on Backend (clarifications)
+- **No Thirdweb keys** — wallet creation is 100% frontend via Thirdweb SDK. Backend only stores/validates addresses.
+- **No investment flow** — investing, redeeming, position tracking are all on-chain + frontend
+- **No Sentry** — structured request logging sufficient for MVP; add if needed later
 
 ## Test Coverage
 | Phase | Tests | Files |
@@ -94,7 +107,9 @@
 | Transactions | 12 | transaction.test.ts |
 | Deals | 20 | deal.test.ts |
 | Smart Wallet | 6 | smart-wallet.test.ts |
-| **Total** | **116** | **12 files** |
+| Rate Limiting | 3 | rate-limit.test.ts |
+| Error Handler | 3 | error-handler.test.ts |
+| **Total** | **122** | **14 files** |
 
 ## API Routes
 | Method | Path | Auth | KYC | Description |
