@@ -554,7 +554,6 @@ ALTER TABLE accreditation_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE linked_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE circle_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE investments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 
 -- Users can only access their own records
@@ -613,8 +612,7 @@ class ColumnEncryption {
   
   encrypt(text: string): string {
     const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipher('aes-256-gcm', this.key);
-    cipher.setIV(iv);
+    const cipher = crypto.createCipheriv('aes-256-gcm', this.key, iv);
     
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
@@ -630,8 +628,7 @@ class ColumnEncryption {
     const iv = Buffer.from(ivHex, 'hex');
     const authTag = Buffer.from(authTagHex, 'hex');
     
-    const decipher = crypto.createDecipher('aes-256-gcm', this.key);
-    decipher.setIV(iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', this.key, iv);
     decipher.setAuthTag(authTag);
     
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
@@ -1789,8 +1786,7 @@ export class DatabaseEncryption {
   
   encrypt(text: string): string {
     const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipher(this.algorithm, this.key);
-    cipher.setIV(iv);
+    const cipher = crypto.createCipheriv(this.algorithm, this.key, iv);
     
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
@@ -1807,8 +1803,7 @@ export class DatabaseEncryption {
     const iv = Buffer.from(ivHex, 'hex');
     const authTag = Buffer.from(authTagHex, 'hex');
     
-    const decipher = crypto.createDecipher(this.algorithm, this.key);
-    decipher.setIV(iv);
+    const decipher = crypto.createDecipheriv(this.algorithm, this.key, iv);
     decipher.setAuthTag(authTag);
     
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
@@ -1950,7 +1945,7 @@ No nginx config needed. No UFW. No SSH hardening. No fail2ban. Railway handles a
 | **KYC Documents** | 5 years post-closure | BSA/AML (31 CFR 1020.210) | kyc_records, file storage |
 | **Transaction Records** | 7 years | IRS (26 CFR 1.6001-1) | transactions, audit_log |
 | **Bank Account Data** | While linked + 3 years | FCRA | linked_accounts |
-| **Investment Records** | 7 years | SEC Rule 17a-4 | investments, opportunities |
+| **Investment Records** | 7 years | SEC Rule 17a-4 | On-chain (immutable) + audit_log |
 | **Audit Logs** | 7 years | SOX | audit_log |
 | **Session Data** | 7 days or logout | N/A (operational) | sessions |
 | **Plaid Tokens** | While account linked | Plaid Terms | linked_accounts |
@@ -2006,21 +2001,16 @@ export class DataRetentionService {
   }
   
   static async hardDeleteUser(userId: string): Promise<void> {
-    // Check for regulatory holds
-    const hasActiveInvestments = await supabase
-      .from('investments')
-      .select('id')
-      .eq('user_id', userId)
-      .in('status', ['active', 'pending']);
-    
-    if (hasActiveInvestments.data?.length) {
-      console.log(`Cannot delete user ${userId}: active investments`);
+    // Check for active on-chain positions via Goldsky before deletion
+    const positions = await getUserPositions(userId);
+    const hasActivePositions = positions.some(p => p.status === 'active' || p.status === 'pending');
+    if (hasActivePositions) {
+      console.log(`Cannot delete user ${userId}: active on-chain positions`);
       return;
     }
     
     // Delete in reverse dependency order
     await supabase.from('sessions').delete().eq('user_id', userId);
-    await supabase.from('investments').delete().eq('user_id', userId);
     await supabase.from('transactions').delete().eq('user_id', userId);
     await supabase.from('circle_accounts').delete().eq('user_id', userId);
     await supabase.from('linked_accounts').delete().eq('user_id', userId);
@@ -2056,15 +2046,11 @@ cron.schedule('0 4 1 * *', () => {
 ```typescript
 // Account deletion request
 export async function requestAccountDeletion(userId: string): Promise<void> {
-  // 1. Check for blocking conditions
-  const activeInvestments = await supabase
-    .from('investments')
-    .select('id, opportunity_id, amount')
-    .eq('user_id', userId)
-    .in('status', ['active', 'pending']);
-  
-  if (activeInvestments.data?.length) {
-    throw new Error('Cannot delete account with active investments');
+  // 1. Check for active on-chain positions via Goldsky before deletion
+  const positions = await getUserPositions(userId);
+  const hasActivePositions = positions.some(p => p.status === 'active' || p.status === 'pending');
+  if (hasActivePositions) {
+    throw new Error('Cannot delete account with active on-chain positions');
   }
   
   const pendingTransactions = await supabase
@@ -2531,18 +2517,10 @@ app.use(Sentry.Handlers.errorHandler());
 ```typescript
 // Migration script example
 // migrations/001_initial_schema.sql
-
--- Create all tables
--- (Schema from section 3)
-
--- Insert initial data
-INSERT INTO opportunities (id, originator_id, title, description, target_amount, min_investment, interest_rate, term_months, payment_frequency, status)
-VALUES 
-  ('550e8400-e29b-41d4-a716-446655440000', 'originator-1', 'Sample Opportunity', 'Test opportunity for development', 100000.00, 1000.00, 0.08, 12, 'monthly', 'draft');
+// See schema in Section 3 — deploy via Supabase CLI:
 ```
 
 ```bash
-# Migration command
 supabase db push --db-url $DATABASE_URL
 ```
 
@@ -2690,16 +2668,16 @@ POST /api/webhooks/circle
 
 ### Phase 5: Investment Engine (Weeks 11-14)
 **Deliverables:**
-- Investment opportunity management
-- USDC transfer to opportunities
-- Position tracking and returns calculation
+- Deal browsing + Goldsky integration
+- USDC transfer to deal contracts
+- Position tracking via Goldsky subgraph
 
 **Key Tasks:**
 ```typescript
-// 5.1 Opportunity endpoints
-GET /api/investments/opportunities
-GET /api/investments/opportunities/:id
-POST /api/investments/invest
+// 5.1 Deal + position endpoints
+GET /api/deals
+GET /api/deals/:dealId
+// Investment happens on-chain via frontend + contract
 
 // 5.2 Thirdweb integration
 const txHash = await executeInvestment(userAddress, amount);
@@ -2729,7 +2707,7 @@ GET /api/offramp/history
 - User management interface
 - Transaction monitoring
 - KYC review queue
-- Opportunity management
+- Deal oversight + borrower management
 
 **Key Tasks:**
 ```typescript
@@ -2738,7 +2716,7 @@ GET /api/admin/users
 PUT /api/admin/users/:id/status
 GET /api/admin/kyc/queue
 PUT /api/admin/kyc/:id/review
-POST /api/admin/opportunities
+PUT /api/admin/users/:id/role
 ```
 
 ### Phase 8: Accreditation (Weeks 19-20)
@@ -2804,4 +2782,4 @@ Decisions from Mark's review (February 2026):
 
 ---
 
-**Document ends at 4,847 words. Ready for CTO review and legal compliance assessment.**
+**Document Version 1.2 — All architecture decisions resolved. Auth module implemented (commit f06609e). Ready for Phase 1 continuation.**
