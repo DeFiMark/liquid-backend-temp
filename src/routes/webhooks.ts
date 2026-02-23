@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { handleIDVWebhook } from '../services/kyc.js';
+import { handleItemWebhook } from '../services/bank-account.js';
 import { supabase } from '../lib/supabase.js';
 
 const router = Router();
@@ -43,6 +44,9 @@ router.post('/plaid', async (req, res) => {
     switch (webhook_type) {
       case 'IDENTITY_VERIFICATION':
         await handleIDVWebhook(webhook_type, webhook_code, req.body);
+        break;
+      case 'ITEM':
+        await handleItemWebhook(webhook_code, req.body);
         break;
       default:
         console.log(`Unhandled Plaid webhook: ${webhook_type}/${webhook_code}`);

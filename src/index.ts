@@ -6,6 +6,7 @@ import authRouter from './auth/router.js';
 import userRouter from './routes/user.js';
 import kycRouter from './routes/kyc.js';
 import webhookRouter from './routes/webhooks.js';
+import bankAccountRouter from './routes/bank-accounts.js';
 import { cleanupExpiredSessions } from './services/session.js';
 
 const app = express();
@@ -25,6 +26,7 @@ app.use('/auth', authRouter);
 app.use('/users', userRouter);
 app.use('/webhooks', webhookRouter);
 app.use('/kyc', kycRouter);
+app.use('/accounts', bankAccountRouter);
 
 // Periodic session cleanup — every hour
 setInterval(() => cleanupExpiredSessions(), 60 * 60 * 1000);
