@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../auth/jwt.js';
-import { TokenExpiredError } from 'jsonwebtoken';
+import pkg from 'jsonwebtoken';
+const { TokenExpiredError } = pkg;
 
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const header = req.headers.authorization;
