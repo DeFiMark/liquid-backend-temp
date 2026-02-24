@@ -92,7 +92,7 @@ router.get('/:id',
   requireAuth,
   async (req, res) => {
     try {
-      const tx = await getTransaction(req.user!.id, req.params.id);
+      const tx = await getTransaction(req.user!.id, req.params.id as string);
       if (!tx) {
         res.status(404).json({ error: 'Transaction not found' });
         return;

@@ -6,7 +6,7 @@ export const updateDealSchema = z.object({
   category: z.string().max(100).optional(),
   risk_grade: z.enum(['A', 'B', 'C', 'D']).optional(),
   collateral_summary: z.string().max(2000).optional(),
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
 });
 
 export const addDocumentSchema = z.object({

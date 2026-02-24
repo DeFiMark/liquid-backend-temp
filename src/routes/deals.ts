@@ -20,7 +20,7 @@ const updateDealSchema = z.object({
   category: z.string().max(100).optional(),
   risk_grade: z.enum(['A', 'B', 'C', 'D']).optional(),
   collateral_summary: z.string().max(2000).optional(),
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
 });
 
 const addDocumentSchema = z.object({
@@ -68,7 +68,7 @@ router.get('/:dealId',
   requireAuth,
   async (req, res) => {
     try {
-      const dealId = parseInt(req.params.dealId);
+      const dealId = parseInt(req.params.dealId as string);
       if (isNaN(dealId)) {
         res.status(400).json({ error: 'Invalid deal ID' });
         return;
@@ -91,7 +91,7 @@ router.put('/:dealId',
   auditLog('update_deal', 'deal'),
   async (req, res) => {
     try {
-      const dealId = parseInt(req.params.dealId);
+      const dealId = parseInt(req.params.dealId as string);
       if (isNaN(dealId)) {
         res.status(400).json({ error: 'Invalid deal ID' });
         return;
@@ -117,7 +117,7 @@ router.get('/:dealId/documents',
   requireAuth,
   async (req, res) => {
     try {
-      const dealId = parseInt(req.params.dealId);
+      const dealId = parseInt(req.params.dealId as string);
       if (isNaN(dealId)) {
         res.status(400).json({ error: 'Invalid deal ID' });
         return;
@@ -136,7 +136,7 @@ router.post('/:dealId/documents',
   auditLog('add_deal_document', 'deal_document'),
   async (req, res) => {
     try {
-      const dealId = parseInt(req.params.dealId);
+      const dealId = parseInt(req.params.dealId as string);
       if (isNaN(dealId)) {
         res.status(400).json({ error: 'Invalid deal ID' });
         return;
@@ -163,12 +163,12 @@ router.delete('/:dealId/documents/:docId',
   auditLog('delete_deal_document', 'deal_document'),
   async (req, res) => {
     try {
-      const dealId = parseInt(req.params.dealId);
+      const dealId = parseInt(req.params.dealId as string);
       if (isNaN(dealId)) {
         res.status(400).json({ error: 'Invalid deal ID' });
         return;
       }
-      await deleteDealDocument(req.params.docId, dealId, req.user!.address);
+      await deleteDealDocument(req.params.docId as string, dealId, req.user!.address);
       res.json({ success: true });
     } catch (err: any) {
       if (err.message.includes('Not authorized')) {

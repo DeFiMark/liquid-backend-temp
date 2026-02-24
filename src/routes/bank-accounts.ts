@@ -81,7 +81,7 @@ router.get('/:id',
   requireAuth,
   async (req, res) => {
     try {
-      const account = await getAccountById(req.user!.id, req.params.id);
+      const account = await getAccountById(req.user!.id, req.params.id as string);
       if (!account) {
         res.status(404).json({ error: 'Account not found' });
         return;
@@ -98,7 +98,7 @@ router.delete('/:id',
   auditLog('deactivate_bank_account', 'linked_account'),
   async (req, res) => {
     try {
-      await deactivateAccount(req.user!.id, req.params.id);
+      await deactivateAccount(req.user!.id, req.params.id as string);
       res.json({ success: true });
     } catch (err: any) {
       console.error('Deactivate error:', err);
@@ -113,7 +113,7 @@ router.post('/:id/processor-token',
   auditLog('create_processor_token', 'linked_account'),
   async (req, res) => {
     try {
-      const token = await createProcessorToken(req.user!.id, req.params.id);
+      const token = await createProcessorToken(req.user!.id, req.params.id as string);
       res.json({ processorToken: token });
     } catch (err: any) {
       console.error('Processor token error:', err);

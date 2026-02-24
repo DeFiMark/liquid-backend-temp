@@ -124,7 +124,7 @@ describe('Bank Account Service', () => {
         data: { processor_token: 'processor-token-xyz' },
       });
 
-      const result = await createProcessorToken('linked-1');
+      const result = await createProcessorToken('user-1', 'linked-1');
 
       expect(decrypt).toHaveBeenCalledWith('encrypted:access-token-abc');
       expect(plaidClient.processorTokenCreate).toHaveBeenCalledWith({

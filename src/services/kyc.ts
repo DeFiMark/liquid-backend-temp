@@ -52,7 +52,7 @@ export async function initiateKYC(userId: string, userEmail?: string): Promise<{
   const linkResponse = await plaidClient.linkTokenCreate({
     user: { client_user_id: userId },
     client_name: 'Liquid',
-    products: ['identity_verification'],
+    products: ['identity_verification'] as any,
     identity_verification: {
       template_id: process.env.PLAID_IDV_TEMPLATE_ID || 'idvtmp_default',
     },
