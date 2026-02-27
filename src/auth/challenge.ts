@@ -26,7 +26,7 @@ export function generateChallenge(address: string): {
   issuedAt: string;
   expirationTime: string;
 } {
-  const nonce = uuidv4();
+  const nonce = uuidv4().replace(/-/g, ''); // siwe requires alphanumeric nonces (no dashes)
   const issuedAt = new Date().toISOString();
   const expirationTime = new Date(Date.now() + NONCE_TTL_MS).toISOString();
 
