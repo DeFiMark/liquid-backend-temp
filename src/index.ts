@@ -31,10 +31,13 @@ app.use(helmet({
 // ---------------------------------------------------------------------------
 // CORS — locked down in production
 // ---------------------------------------------------------------------------
+const corsOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
+  : [];
+const corsAllowAll = corsOrigins.includes('*') || (!process.env.CORS_ORIGINS && process.env.NODE_ENV !== 'production');
+
 app.use(cors({
-  origin: process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
-    : (process.env.NODE_ENV === 'production' ? false : '*'),
+  origin: corsAllowAll ? true : (corsOrigins.length ? corsOrigins : false),
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
